@@ -474,3 +474,56 @@ wss.on("connection", async (ws) => {
       const me = ws.user.name || "Гость";
       const chatId = Math.floor(msg.chatId);
       const text = msg.text.trim();
+      if (!text) return;
+
+      // кто участники?
+      const { rows } = await pool.query(
+        `SELECT id, user_a, user_b FROM direct_chats WHERE id=$1 LIMIT 1`,
+        [chatId]
+      );
+      if (!rows.length) return;
+      const chat = rows[0];
+      if (chat.user_a !== me && chat.user_b !== me) return;
+
+      const peer = (chat.user_a === me) ? chat.user_b : chat.user_a;
+
+      const saved = await saveDM(chatId, me, text.slice(0, 2000));
+      const message = { id: saved.id, at: saved.at, from: me, text: text.slice(0, 2000) };
+
+      // отправляем всем вкладкам обоих участников
+      for (const c of wss.clients) {
+        if (c.readyState !== 1) continue;
+        const name = c.user?.name || "Гость";
+        if (name === me || name === peer) {
+          send(c, { type: "dm_message", chatId, peer: name === me ? peer : me, message });
+        }
+      }
+
+      await sendDMStateToParticipants(me, peer);
+      return;
+    }
+  });
+
+  ws.on("close", async () => {
+    if (ws.channel?.name) {
+      broadcastPresence(ws.channel.name);
+      await broadcastSeen(ws.channel);
+    }
+  });
+});
+
+// heartbeat
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 30000);
+
+const PORT = process.env.PORT || 3000;
+
+(async () => {
+  await migrate();
+  server.listen(PORT, () => console.log(`Listening on :${PORT}`));
+})();
