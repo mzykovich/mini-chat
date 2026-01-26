@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini Chat</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #0b1220; color: #e6edf3; }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 16px; }
+    .top { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap: wrap; }
+    .card { background:#111a2e; border:1px solid #1f2a44; border-radius: 12px; padding: 12px; }
+    #log { height: 60vh; overflow:auto; padding: 12px; background:#0f172a; border-radius: 12px; border:1px solid #1f2a44; }
+    .msg { margin: 8px 0; }
+    .meta { opacity:.7; font-size: 12px; }
+    .me .bubble { background:#1f6feb; }
+    .bubble { display:inline-block; padding:10px 12px; border-radius: 12px; background:#1b243b; max-width: 100%; }
+    .row { display:flex; gap:10px; margin-top: 12px; }
+    input, button { border-radius: 10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding: 10px; }
+    input { flex: 1; }
+    button { cursor:pointer; }
+    .status { font-size: 12px; opacity: .8; }
+    .pill { display:inline-block; padding: 4px 8px; border-radius: 999px; background:#0b1220; border:1px solid #2a3a63; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="card" style="flex:1; min-width: 260px;">
+        <div><b>Mini Chat</b> <span class="pill">общий канал</span></div>
+        <div class="status" id="presence">Подключение…</div>
+      </div>
+      <div class="card" style="min-width: 260px;">
+        <div class="status">Твой ник</div>
+        <div class="row" style="margin-top:8px;">
+          <input id="name" placeholder="например: Ivan" maxlength="32" />
+          <button id="saveName">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div id="log"></div>
+
+    <div class="row">
+      <input id="text" placeholder="Написать сообщение…" maxlength="2000" />
+      <button id="send">Отправить</button>
+    </div>
+
+    <div class="status" id="seen"></div>
+  </div>
+
+<script>
+  const log = document.getElementById("log");
+  const text = document.getElementById("text");
+  const sendBtn = document.getElementById("send");
+  const nameInp = document.getElementById("name");
+  const saveNameBtn = document.getElementById("saveName");
+  const presenceEl = document.getElementById("presence");
+  const seenEl = document.getElementById("seen");
+
+  let myName = localStorage.getItem("miniChatName") || "";
+  if (myName) nameInp.value = myName;
+
+  // ws url (поддерживает http/https)
+  const wsProto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${wsProto}://${location.host}`);
+
+  let lastSeq = 0;
+  let readUpTo = 0;
+
+  function addMessage(m) {
+    const mine = (m.from === myName && myName);
+    const div = document.createElement("div");
+    div.className = "msg" + (mine ? " me" : "");
+    const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    div.innerHTML = `
+      <div class="meta">${escapeHtml(m.from)} • ${at}</div>
+      <div class="bubble">${escapeHtml(m.text)}</div>
+    `;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function sendSeen(seq) {
+    ws.send(JSON.stringify({ type: "seen", seq }));
+  }
+
+  ws.addEventListener("open", () => {
+    if (myName) ws.send(JSON.stringify({ type: "hello", name: myName }));
+  });
+
+  ws.addEventListener("message", (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === "history") {
+      log.innerHTML = "";
+      for (const m of msg.messages) addMessage(m);
+      // “прочитано” = последнее, что мы видим
+      const last = msg.messages.at(-1);
+      if (last) sendSeen(last.id);
+      return;
+    }
+
+    if (msg.type === "chat") {
+      addMessage(msg.message);
+      lastSeq = Math.max(lastSeq, msg.message.id);
+      // Когда вкладка активна — считаем прочитанным
+      if (document.visibilityState === "visible") {
+        sendSeen(msg.message.id);
+      }
+      return;
+    }
+
+    if (msg.type === "presence") {
+      presenceEl.textContent = `Онлайн: ${msg.users.join(", ") || "никого"}`;
+      return;
+    }
+
+    if (msg.type === "seen_state") {
+      lastSeq = msg.lastSeq;
+      readUpTo = msg.readUpTo;
+      if (lastSeq === 0) seenEl.textContent = "";
+      else {
+        const allRead = (readUpTo >= lastSeq);
+        seenEl.textContent = allRead
+          ? `✅ Прочитано всеми (онлайн: ${msg.connected})`
+          : `⌛ Прочитано до #${readUpTo} из #${lastSeq} (онлайн: ${msg.connected})`;
+      }
+      return;
+    }
+  });
+
+  function send() {
+    const v = text.value.trim();
+    if (!v) return;
+    ws.send(JSON.stringify({ type: "chat", text: v }));
+    text.value = "";
+    text.focus();
+  }
+
+  sendBtn.addEventListener("click", send);
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") send();
+  });
+
+  function saveName() {
+    myName = nameInp.value.trim().slice(0, 32);
+    localStorage.setItem("miniChatName", myName);
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: "hello", name: myName || "Гость" }));
+  }
+  saveNameBtn.addEventListener("click", saveName);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && lastSeq > 0 && ws.readyState === 1) {
+      sendSeen(lastSeq);
+    }
+  });
+</script>
+</body>
+</html>
