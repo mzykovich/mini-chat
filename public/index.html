@@ -11,16 +11,18 @@
     .main { flex:1; display:flex; flex-direction:column; padding: 12px; box-sizing: border-box; }
     .card { background:#111a2e; border:1px solid #1f2a44; border-radius: 12px; padding: 10px; }
     .channels { margin-top: 10px; display:flex; flex-direction:column; gap:6px; }
-    .ch { padding: 8px 10px; border-radius: 10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; }
-    .ch.active { outline: 2px solid #1f6feb; }
+    .ch { padding: 8px 10px; border-radius: 10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
+    .ch:hover { filter: brightness(1.08); }
+    .ch.active { outline: 2px solid #1f6feb; background:#0b1b3a; }
     #log { flex:1; overflow:auto; padding: 12px; background:#0f172a; border-radius: 12px; border:1px solid #1f2a44; margin-top: 10px; }
     .msg { margin: 8px 0; }
-    .meta { opacity:.7; font-size: 12px; }
+    .meta { opacity:.75; font-size: 12px; }
     .bubble { display:inline-block; padding:10px 12px; border-radius: 12px; background:#1b243b; max-width: 100%; white-space: pre-wrap; }
     .row { display:flex; gap:10px; margin-top: 10px; }
     input, button { border-radius: 10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding: 10px; }
     input { flex: 1; }
     button { cursor:pointer; }
+    button:disabled { opacity: .6; cursor:not-allowed; }
     .status { font-size: 12px; opacity:.8; margin-top: 8px; }
   </style>
 </head>
@@ -49,10 +51,19 @@
   </div>
 
   <div class="main">
-    <div class="card">
-      <div><b id="title"># general</b></div>
-      <div class="status" id="seen"></div>
+    <div class="card" style="display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
+      <div>
+        <div><b id="title"># general</b></div>
+        <div class="status" id="seen"></div>
+      </div>
+
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input id="search" placeholder="Поиск в канале…" style="max-width:260px;" />
+        <button id="toBottom" title="Вниз" style="display:none;">⬇️</button>
+      </div>
     </div>
+
+    <div class="status" id="typing" style="height:18px; margin-top:8px; opacity:.75;"></div>
 
     <div id="log"></div>
 
@@ -75,6 +86,9 @@
   const channelsEl = document.getElementById("channels");
   const newChInp = document.getElementById("newCh");
   const addChBtn = document.getElementById("addCh");
+  const searchInp = document.getElementById("search");
+  const toBottomBtn = document.getElementById("toBottom");
+  const typingEl = document.getElementById("typing");
 
   let myName = localStorage.getItem("miniChatName") || "";
   if (myName) nameInp.value = myName;
@@ -82,23 +96,29 @@
   let currentChannel = "general";
   let lastSeq = 0;
 
+  let channelsCache = [];   // для стабильной подсветки активного канала
+  let messagesCache = [];   // сообщения текущего канала (для поиска/рендера)
+  let lastDateLabel = "";   // для разделителей дат
+
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${wsProto}://${location.host}`);
 
-  function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  }
+  // Статус подключения (чтобы не висело “Подключение…”)
+  presenceEl.textContent = "Подключение…";
+  ws.addEventListener("open", () => {
+    presenceEl.textContent = "✅ Подключено";
+  });
+  ws.addEventListener("close", () => {
+    presenceEl.textContent = "⚠️ Соединение закрыто (обнови страницу)";
+  });
+  ws.addEventListener("error", () => {
+    presenceEl.textContent = "❌ Ошибка WebSocket";
+  });
 
-  function addMessage(m) {
-    const div = document.createElement("div");
-    div.className = "msg";
-    const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    div.innerHTML = `
-      <div class="meta">${escapeHtml(m.from)} • ${at}</div>
-      <div class="bubble">${escapeHtml(m.text)}</div>
-    `;
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
+  function escapeHtml(s) {
+    return String(s || "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
   }
 
   function setTitle() {
@@ -119,8 +139,15 @@
   function joinChannel(ch) {
     currentChannel = ch;
     setTitle();
+
+    // очистка для нового канала
+    searchInp.value = "";
+    typingEl.textContent = "";
+    messagesCache = [];
+    lastDateLabel = "";
     log.innerHTML = "";
     lastSeq = 0;
+
     ws.send(JSON.stringify({ type: "join", channel: ch }));
   }
 
@@ -128,6 +155,103 @@
     ws.send(JSON.stringify({ type: "seen", seq }));
   }
 
+  // --- UI фишки ---
+  function dateLabel(ts) {
+    const d = new Date(ts);
+    const today = new Date();
+    const yd = new Date(Date.now() - 86400000);
+
+    const dd = d.toDateString();
+    if (dd === today.toDateString()) return "Сегодня";
+    if (dd === yd.toDateString()) return "Вчера";
+    return d.toLocaleDateString();
+  }
+
+  function addDateDivider(ts) {
+    const label = dateLabel(ts);
+    if (label === lastDateLabel) return;
+    lastDateLabel = label;
+
+    const div = document.createElement("div");
+    div.style.margin = "14px 0";
+    div.style.display = "flex";
+    div.style.alignItems = "center";
+    div.style.gap = "10px";
+    div.innerHTML = `
+      <div style="height:1px; background:#1f2a44; flex:1;"></div>
+      <div style="font-size:12px; opacity:.7;">${escapeHtml(label)}</div>
+      <div style="height:1px; background:#1f2a44; flex:1;"></div>
+    `;
+    log.appendChild(div);
+  }
+
+  function addMessage(m) {
+    addDateDivider(m.at);
+
+    const div = document.createElement("div");
+    div.className = "msg";
+    div.dataset.id = String(m.id || "");
+    div.dataset.text = m.text || "";
+
+    const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    div.innerHTML = `
+      <div class="meta" style="display:flex; gap:10px; align-items:center; justify-content:space-between;">
+        <span>${escapeHtml(m.from)} • ${at}</span>
+        <button class="copyBtn" title="Скопировать" style="padding:6px 8px; font-size:12px;">📋</button>
+      </div>
+      <div class="bubble">${escapeHtml(m.text || "")}</div>
+    `;
+
+    div.querySelector(".copyBtn").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(m.text || "");
+        const btn = div.querySelector(".copyBtn");
+        const old = btn.textContent;
+        btn.textContent = "✅";
+        setTimeout(() => (btn.textContent = old), 700);
+      } catch {
+        alert("Не удалось скопировать");
+      }
+    };
+
+    log.appendChild(div);
+  }
+
+  function renderFromCache() {
+    log.innerHTML = "";
+    lastDateLabel = "";
+
+    const q = (searchInp.value || "").trim().toLowerCase();
+    const list = q
+      ? messagesCache.filter(m => (m.text || "").toLowerCase().includes(q))
+      : messagesCache;
+
+    for (const m of list) addMessage(m);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  searchInp.addEventListener("input", renderFromCache);
+
+  let typingTimer = null;
+  text.addEventListener("input", () => {
+    typingEl.textContent = "Ты печатаешь…";
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => (typingEl.textContent = ""), 600);
+  });
+
+  function nearBottom() {
+    return (log.scrollHeight - log.scrollTop - log.clientHeight) < 120;
+  }
+
+  log.addEventListener("scroll", () => {
+    toBottomBtn.style.display = nearBottom() ? "none" : "inline-block";
+  });
+
+  toBottomBtn.addEventListener("click", () => {
+    log.scrollTop = log.scrollHeight;
+  });
+
+  // --- WebSocket handlers ---
   ws.addEventListener("open", () => {
     if (myName) ws.send(JSON.stringify({ type: "hello", name: myName }));
     setTitle();
@@ -137,37 +261,52 @@
     const msg = JSON.parse(ev.data);
 
     if (msg.type === "channels") {
-      renderChannels(msg.channels || []);
+      channelsCache = msg.channels || [];
+      renderChannels(channelsCache);
       return;
     }
 
     if (msg.type === "joined") {
       currentChannel = msg.channel;
       setTitle();
+      if (channelsCache.length) renderChannels(channelsCache); // чтобы обводка обновилась
       return;
     }
 
     if (msg.type === "history") {
       if (msg.channel !== currentChannel) return;
-      log.innerHTML = "";
-      for (const m of msg.messages) {
-        addMessage(m);
-        lastSeq = Math.max(lastSeq, m.id);
-      }
+
+      messagesCache = (msg.messages || []);
+      lastSeq = 0;
+      for (const m of messagesCache) lastSeq = Math.max(lastSeq, m.id);
+
+      renderFromCache();
+
       if (lastSeq > 0) sendSeen(lastSeq);
       return;
     }
 
     if (msg.type === "chat") {
       if (msg.channel !== currentChannel) return;
-      addMessage(msg.message);
+
+      messagesCache.push(msg.message);
       lastSeq = Math.max(lastSeq, msg.message.id);
+
+      // если включён поиск — перерендерим, иначе добавим только новое
+      if ((searchInp.value || "").trim()) {
+        renderFromCache();
+      } else {
+        addMessage(msg.message);
+        if (nearBottom()) log.scrollTop = log.scrollHeight;
+      }
+
       if (document.visibilityState === "visible") sendSeen(lastSeq);
       return;
     }
 
     if (msg.type === "seen_state") {
       if (msg.channel !== currentChannel) return;
+
       if (msg.lastSeq === 0) seenEl.textContent = "";
       else {
         const allRead = (msg.readUpTo >= msg.lastSeq);
@@ -175,6 +314,12 @@
           ? `✅ Прочитано всеми (онлайн: ${msg.connected})`
           : `⌛ Прочитано до #${msg.readUpTo} из #${msg.lastSeq} (онлайн: ${msg.connected})`;
       }
+      return;
+    }
+
+    // Если у тебя на сервере есть presence — это будет работать.
+    if (msg.type === "presence") {
+      presenceEl.textContent = `Онлайн: ${(msg.users || []).join(", ") || "никого"}`;
       return;
     }
   });
