@@ -68,7 +68,7 @@
         <input id="name" placeholder="Твой ник" maxlength="32"/>
         <button id="saveName">OK</button>
       </div>
-      <div class="status muted">Ctrl+K — поиск • Esc — очистить</div>
+      <div class="status muted">Ctrl+Y — поиск • Esc — очистить</div>
     </div>
 
     <div class="card" style="margin-top:10px;">
@@ -355,9 +355,9 @@
 
   searchInp.addEventListener("input", renderFromCache);
 
-  // Ctrl+K search, Esc clear
+  // Ctrl+Y search, Esc clear
   document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
       e.preventDefault();
       searchInp.focus();
     }
@@ -560,3 +560,4 @@
 </script>
 </body>
 </html>
+
