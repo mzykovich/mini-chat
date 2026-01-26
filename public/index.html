@@ -6,39 +6,53 @@
   <title>Mini Chat</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #0b1220; color: #e6edf3; }
-    .wrap { max-width: 900px; margin: 0 auto; padding: 16px; }
-    .top { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap: wrap; }
-    .card { background:#111a2e; border:1px solid #1f2a44; border-radius: 12px; padding: 12px; }
-    #log { height: 60vh; overflow:auto; padding: 12px; background:#0f172a; border-radius: 12px; border:1px solid #1f2a44; }
+    .app { display:flex; height: 100vh; }
+    .side { width: 260px; padding: 12px; border-right:1px solid #1f2a44; background:#0a1020; box-sizing: border-box; }
+    .main { flex:1; display:flex; flex-direction:column; padding: 12px; box-sizing: border-box; }
+    .card { background:#111a2e; border:1px solid #1f2a44; border-radius: 12px; padding: 10px; }
+    .channels { margin-top: 10px; display:flex; flex-direction:column; gap:6px; }
+    .ch { padding: 8px 10px; border-radius: 10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; }
+    .ch.active { outline: 2px solid #1f6feb; }
+    #log { flex:1; overflow:auto; padding: 12px; background:#0f172a; border-radius: 12px; border:1px solid #1f2a44; margin-top: 10px; }
     .msg { margin: 8px 0; }
     .meta { opacity:.7; font-size: 12px; }
-    .me .bubble { background:#1f6feb; }
-    .bubble { display:inline-block; padding:10px 12px; border-radius: 12px; background:#1b243b; max-width: 100%; }
-    .row { display:flex; gap:10px; margin-top: 12px; }
+    .bubble { display:inline-block; padding:10px 12px; border-radius: 12px; background:#1b243b; max-width: 100%; white-space: pre-wrap; }
+    .row { display:flex; gap:10px; margin-top: 10px; }
     input, button { border-radius: 10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding: 10px; }
     input { flex: 1; }
     button { cursor:pointer; }
-    .status { font-size: 12px; opacity: .8; }
-    .pill { display:inline-block; padding: 4px 8px; border-radius: 999px; background:#0b1220; border:1px solid #2a3a63; }
+    .status { font-size: 12px; opacity:.8; margin-top: 8px; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="top">
-      <div class="card" style="flex:1; min-width: 260px;">
-        <div><b>Mini Chat</b> <span class="pill">общий канал</span></div>
-        <div class="status" id="presence">Подключение…</div>
-      </div>
-      <div class="card" style="min-width: 260px;">
-        <div class="status">Твой ник</div>
-        <div class="row" style="margin-top:8px;">
-          <input id="name" placeholder="например: Ivan" maxlength="32" />
-          <button id="saveName">OK</button>
-        </div>
+<div class="app">
+  <div class="side">
+    <div class="card">
+      <div><b>Mini Chat</b></div>
+      <div class="status" id="presence">Подключение…</div>
+      <div class="row" style="margin-top:8px;">
+        <input id="name" placeholder="Твой ник" maxlength="32"/>
+        <button id="saveName">OK</button>
       </div>
     </div>
 
-    <div style="height:12px"></div>
+    <div class="card" style="margin-top:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <b>Каналы</b>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <input id="newCh" placeholder="new-channel" maxlength="40"/>
+        <button id="addCh">+</button>
+      </div>
+      <div class="channels" id="channels"></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="card">
+      <div><b id="title"># general</b></div>
+      <div class="status" id="seen"></div>
+    </div>
 
     <div id="log"></div>
 
@@ -46,9 +60,8 @@
       <input id="text" placeholder="Написать сообщение…" maxlength="2000" />
       <button id="send">Отправить</button>
     </div>
-
-    <div class="status" id="seen"></div>
   </div>
+</div>
 
 <script>
   const log = document.getElementById("log");
@@ -58,21 +71,27 @@
   const saveNameBtn = document.getElementById("saveName");
   const presenceEl = document.getElementById("presence");
   const seenEl = document.getElementById("seen");
+  const titleEl = document.getElementById("title");
+  const channelsEl = document.getElementById("channels");
+  const newChInp = document.getElementById("newCh");
+  const addChBtn = document.getElementById("addCh");
 
   let myName = localStorage.getItem("miniChatName") || "";
   if (myName) nameInp.value = myName;
 
-  // ws url (поддерживает http/https)
+  let currentChannel = "general";
+  let lastSeq = 0;
+
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${wsProto}://${location.host}`);
 
-  let lastSeq = 0;
-  let readUpTo = 0;
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
 
   function addMessage(m) {
-    const mine = (m.from === myName && myName);
     const div = document.createElement("div");
-    div.className = "msg" + (mine ? " me" : "");
+    div.className = "msg";
     const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
     div.innerHTML = `
       <div class="meta">${escapeHtml(m.from)} • ${at}</div>
@@ -82,8 +101,27 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function setTitle() {
+    titleEl.textContent = `# ${currentChannel}`;
+  }
+
+  function renderChannels(list) {
+    channelsEl.innerHTML = "";
+    for (const ch of list) {
+      const b = document.createElement("div");
+      b.className = "ch" + (ch === currentChannel ? " active" : "");
+      b.textContent = "# " + ch;
+      b.onclick = () => joinChannel(ch);
+      channelsEl.appendChild(b);
+    }
+  }
+
+  function joinChannel(ch) {
+    currentChannel = ch;
+    setTitle();
+    log.innerHTML = "";
+    lastSeq = 0;
+    ws.send(JSON.stringify({ type: "join", channel: ch }));
   }
 
   function sendSeen(seq) {
@@ -92,44 +130,50 @@
 
   ws.addEventListener("open", () => {
     if (myName) ws.send(JSON.stringify({ type: "hello", name: myName }));
+    setTitle();
   });
 
   ws.addEventListener("message", (ev) => {
     const msg = JSON.parse(ev.data);
 
+    if (msg.type === "channels") {
+      renderChannels(msg.channels || []);
+      return;
+    }
+
+    if (msg.type === "joined") {
+      currentChannel = msg.channel;
+      setTitle();
+      return;
+    }
+
     if (msg.type === "history") {
+      if (msg.channel !== currentChannel) return;
       log.innerHTML = "";
-      for (const m of msg.messages) addMessage(m);
-      // “прочитано” = последнее, что мы видим
-      const last = msg.messages.at(-1);
-      if (last) sendSeen(last.id);
+      for (const m of msg.messages) {
+        addMessage(m);
+        lastSeq = Math.max(lastSeq, m.id);
+      }
+      if (lastSeq > 0) sendSeen(lastSeq);
       return;
     }
 
     if (msg.type === "chat") {
+      if (msg.channel !== currentChannel) return;
       addMessage(msg.message);
       lastSeq = Math.max(lastSeq, msg.message.id);
-      // Когда вкладка активна — считаем прочитанным
-      if (document.visibilityState === "visible") {
-        sendSeen(msg.message.id);
-      }
-      return;
-    }
-
-    if (msg.type === "presence") {
-      presenceEl.textContent = `Онлайн: ${msg.users.join(", ") || "никого"}`;
+      if (document.visibilityState === "visible") sendSeen(lastSeq);
       return;
     }
 
     if (msg.type === "seen_state") {
-      lastSeq = msg.lastSeq;
-      readUpTo = msg.readUpTo;
-      if (lastSeq === 0) seenEl.textContent = "";
+      if (msg.channel !== currentChannel) return;
+      if (msg.lastSeq === 0) seenEl.textContent = "";
       else {
-        const allRead = (readUpTo >= lastSeq);
+        const allRead = (msg.readUpTo >= msg.lastSeq);
         seenEl.textContent = allRead
           ? `✅ Прочитано всеми (онлайн: ${msg.connected})`
-          : `⌛ Прочитано до #${readUpTo} из #${lastSeq} (онлайн: ${msg.connected})`;
+          : `⌛ Прочитано до #${msg.readUpTo} из #${msg.lastSeq} (онлайн: ${msg.connected})`;
       }
       return;
     }
@@ -144,16 +188,21 @@
   }
 
   sendBtn.addEventListener("click", send);
-  text.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") send();
-  });
+  text.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 
   function saveName() {
-    myName = nameInp.value.trim().slice(0, 32);
+    myName = nameInp.value.trim().slice(0, 32) || "Гость";
     localStorage.setItem("miniChatName", myName);
-    if (ws.readyState === 1) ws.send(JSON.stringify({ type: "hello", name: myName || "Гость" }));
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: "hello", name: myName }));
   }
   saveNameBtn.addEventListener("click", saveName);
+
+  addChBtn.addEventListener("click", () => {
+    const name = newChInp.value.trim();
+    if (!name) return;
+    ws.send(JSON.stringify({ type: "create_channel", name }));
+    newChInp.value = "";
+  });
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && lastSeq > 0 && ws.readyState === 1) {
