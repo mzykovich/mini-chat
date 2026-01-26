@@ -14,7 +14,6 @@ const wss = new WebSocketServer({ server });
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // На Render обычно нужен SSL. Для MVP достаточно так:
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
@@ -43,7 +42,6 @@ async function migrate() {
     );
   `);
 
-  // гарантируем general
   await pool.query(
     `INSERT INTO channels (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`,
     ["general"]
@@ -52,13 +50,11 @@ async function migrate() {
 
 function normalizeChannelName(name) {
   const safe = (name || "general").toLowerCase().trim().slice(0, 40);
-  // простая нормализация (чтобы не было пустых/странных):
   return safe.replace(/\s+/g, "-") || "general";
 }
 
 async function getOrCreateChannel(name) {
   const safe = normalizeChannelName(name);
-
   const { rows } = await pool.query(
     `INSERT INTO channels (name) VALUES ($1)
      ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
@@ -69,9 +65,7 @@ async function getOrCreateChannel(name) {
 }
 
 async function listChannels() {
-  const { rows } = await pool.query(
-    `SELECT id, name FROM channels ORDER BY name ASC LIMIT 200`
-  );
+  const { rows } = await pool.query(`SELECT id, name FROM channels ORDER BY name ASC LIMIT 200`);
   return rows;
 }
 
@@ -84,7 +78,6 @@ async function loadHistory(channelId, limit = 200) {
      LIMIT $2`,
     [channelId, limit]
   );
-
   return rows.reverse().map((r) => ({
     id: Number(r.id),
     from: r.sender,
@@ -103,6 +96,10 @@ async function saveMessage(channelId, sender, text) {
   return { id: Number(rows[0].id), at: Number(rows[0].at) };
 }
 
+function send(ws, obj) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
 function broadcastAll(obj) {
   const payload = JSON.stringify(obj);
   for (const client of wss.clients) {
@@ -119,7 +116,7 @@ function broadcastToChannel(channelName, obj) {
   }
 }
 
-// ===== Presence (онлайн список по каналу) =====
+// ===== Presence =====
 function listUsersInChannel(channelName) {
   const users = [];
   for (const client of wss.clients) {
@@ -127,23 +124,14 @@ function listUsersInChannel(channelName) {
       users.push(client.user?.name || "Гость");
     }
   }
-  // уберём повторы и пустые
   return Array.from(new Set(users.filter(Boolean)));
 }
 
 function broadcastPresence(channelName) {
-  broadcastToChannel(channelName, {
-    type: "presence",
-    users: listUsersInChannel(channelName),
-  });
+  broadcastToChannel(channelName, { type: "presence", users: listUsersInChannel(channelName) });
 }
 
-async function broadcastChannels() {
-  const chans = await listChannels();
-  broadcastAll({ type: "channels", channels: chans.map((c) => c.name) });
-}
-
-// ===== Read receipts (read-up-to) =====
+// ===== Read receipts (per-channel) =====
 async function setRead(channelId, userName, lastReadId) {
   await pool.query(
     `INSERT INTO channel_reads (channel_id, user_name, last_read_message_id)
@@ -189,31 +177,69 @@ async function broadcastSeen(channel) {
   });
 }
 
-// ===== WebSocket =====
+// ===== Unread badges (per user) =====
+async function getChannelsStateForUser(userName) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      c.id,
+      c.name,
+      COALESCE(m.last_id, 0) AS last_id,
+      COALESCE(r.last_read_message_id, 0) AS read_id
+    FROM channels c
+    LEFT JOIN (
+      SELECT channel_id, MAX(id) AS last_id
+      FROM messages
+      GROUP BY channel_id
+    ) m ON m.channel_id = c.id
+    LEFT JOIN channel_reads r
+      ON r.channel_id = c.id AND r.user_name = $1
+    ORDER BY c.name ASC
+    LIMIT 200
+    `,
+    [userName]
+  );
+
+  return rows.map((x) => {
+    const lastId = Number(x.last_id || 0);
+    const readId = Number(x.read_id || 0);
+    const unread = Math.max(0, lastId - readId);
+    return { name: x.name, lastId, readId, unread };
+  });
+}
+
+async function sendChannelsState(ws) {
+  const userName = ws.user?.name || "Гость";
+  const state = await getChannelsStateForUser(userName);
+  send(ws, { type: "channels_state", channels: state });
+}
+
+async function sendChannelsStateToAllClients() {
+  // у каждого пользователя свой unread, поэтому шлём индивидуально
+  for (const client of wss.clients) {
+    if (client.readyState === 1) {
+      // не await, чтобы не было очереди — просто "fire and forget" с промисом
+      sendChannelsState(client).catch(() => {});
+    }
+  }
+}
+
+// ===== WS =====
 wss.on("connection", async (ws) => {
   ws.isAlive = true;
   ws.user = { name: "Гость" };
   ws.channel = await getOrCreateChannel("general");
 
-  // Отдадим список каналов и подключение к general
-  ws.send(
-    JSON.stringify({
-      type: "channels",
-      channels: (await listChannels()).map((c) => c.name),
-    })
-  );
-  ws.send(JSON.stringify({ type: "joined", channel: ws.channel.name }));
+  // Список каналов (для первичного рендера)
+  send(ws, { type: "channels", channels: (await listChannels()).map((c) => c.name) });
 
-  // История
-  ws.send(
-    JSON.stringify({
-      type: "history",
-      channel: ws.channel.name,
-      messages: await loadHistory(ws.channel.id),
-    })
-  );
+  // Более полезное состояние каналов (unread)
+  await sendChannelsState(ws);
 
-  // Presence + seen для текущего канала
+  // Joined + history
+  send(ws, { type: "joined", channel: ws.channel.name });
+  send(ws, { type: "history", channel: ws.channel.name, messages: await loadHistory(ws.channel.id) });
+
   broadcastPresence(ws.channel.name);
   await broadcastSeen(ws.channel);
 
@@ -227,52 +253,53 @@ wss.on("connection", async (ws) => {
       return;
     }
 
-    // Установить имя
     if (msg.type === "hello" && typeof msg.name === "string") {
       ws.user.name = msg.name.trim().slice(0, 32) || "Гость";
       broadcastPresence(ws.channel.name);
       await broadcastSeen(ws.channel);
+
+      // после смены ника unread считается по новому имени
+      await sendChannelsState(ws);
       return;
     }
 
-    // Создать канал
     if (msg.type === "create_channel" && typeof msg.name === "string") {
       await getOrCreateChannel(msg.name);
-      await broadcastChannels();
+      broadcastAll({ type: "channels", channels: (await listChannels()).map((c) => c.name) });
+
+      // обновим unread у всех (появился новый канал)
+      await sendChannelsStateToAllClients();
       return;
     }
 
-    // Перейти в канал
     if (msg.type === "join" && typeof msg.channel === "string") {
       const prev = ws.channel;
       ws.channel = await getOrCreateChannel(msg.channel);
 
-      ws.send(JSON.stringify({ type: "joined", channel: ws.channel.name }));
-      ws.send(
-        JSON.stringify({
-          type: "history",
-          channel: ws.channel.name,
-          messages: await loadHistory(ws.channel.id),
-        })
-      );
+      send(ws, { type: "joined", channel: ws.channel.name });
+      send(ws, { type: "history", channel: ws.channel.name, messages: await loadHistory(ws.channel.id) });
 
-      // обновим presence в старом и новом канале
       if (prev?.name) broadcastPresence(prev.name);
       broadcastPresence(ws.channel.name);
 
       await broadcastSeen(ws.channel);
+
+      // чтобы бейджи пересчитались (обычно ты читаешь историю и отправляешь seen)
+      await sendChannelsState(ws);
       return;
     }
 
-    // “прочитал до”
     if (msg.type === "seen" && typeof msg.seq === "number") {
       const lastRead = Math.max(0, Math.floor(msg.seq));
       await setRead(ws.channel.id, ws.user.name || "Гость", lastRead);
+
       await broadcastSeen(ws.channel);
+
+      // unread изменился — обновим только этому пользователю
+      await sendChannelsState(ws);
       return;
     }
 
-    // Новое сообщение
     if (msg.type === "chat" && typeof msg.text === "string") {
       const text = msg.text.trim();
       if (!text) return;
@@ -290,19 +317,17 @@ wss.on("connection", async (ws) => {
         text: text.slice(0, 2000),
       };
 
-      broadcastToChannel(ws.channel.name, {
-        type: "chat",
-        channel: ws.channel.name,
-        message,
-      });
+      broadcastToChannel(ws.channel.name, { type: "chat", channel: ws.channel.name, message });
 
       await broadcastSeen(ws.channel);
+
+      // unread у всех в этом канале и в других каналах изменился (у тех, кто не в канале)
+      await sendChannelsStateToAllClients();
       return;
     }
   });
 
   ws.on("close", async () => {
-    // обновим presence/seen для оставшихся в канале
     if (ws.channel?.name) {
       broadcastPresence(ws.channel.name);
       await broadcastSeen(ws.channel);
@@ -310,7 +335,7 @@ wss.on("connection", async (ws) => {
   });
 });
 
-// heartbeat, чтобы вычищать “мертвые” сокеты
+// heartbeat
 setInterval(() => {
   for (const ws of wss.clients) {
     if (ws.isAlive === false) ws.terminate();
@@ -323,7 +348,5 @@ const PORT = process.env.PORT || 3000;
 
 (async () => {
   await migrate();
-  server.listen(PORT, () => {
-    console.log(`Listening on :${PORT}`);
-  });
+  server.listen(PORT, () => console.log(`Listening on :${PORT}`));
 })();
