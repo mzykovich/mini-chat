@@ -440,4 +440,37 @@ wss.on("connection", async (ws) => {
     if (msg.type === "open_dm" && typeof msg.peer === "string") {
       const me = ws.user.name || "Гость";
       const peer = msg.peer.trim().slice(0, 32);
-      if
+      if (!peer || peer === me) return;
+
+      const chat = await getOrCreateDM(me, peer);
+      const actualPeer = dmPeer(chat, me);
+
+      ws.mode = "dm";
+      ws.dm = { chatId: Number(chat.id), peer: actualPeer };
+
+      send(ws, {
+        type: "dm_joined",
+        peer: actualPeer,
+        chatId: Number(chat.id),
+        messages: await loadDMHistory(chat.id),
+      });
+
+      await sendDMState(ws);
+      return;
+    }
+
+    // dm seen
+    if (msg.type === "dm_seen" && typeof msg.seq === "number" && typeof msg.chatId === "number") {
+      const me = ws.user.name || "Гость";
+      const chatId = Math.floor(msg.chatId);
+      const lastRead = Math.max(0, Math.floor(msg.seq));
+      await setDMRead(chatId, me, lastRead);
+      await sendDMState(ws);
+      return;
+    }
+
+    // dm send
+    if (msg.type === "dm_send" && typeof msg.text === "string" && typeof msg.chatId === "number") {
+      const me = ws.user.name || "Гость";
+      const chatId = Math.floor(msg.chatId);
+      const text = msg.text.trim();
