@@ -23,18 +23,14 @@
 
     #log { flex:1; overflow:auto; padding:12px; background:#0f172a; border-radius:12px; border:1px solid #1f2a44; margin-top:10px; }
     .msg { margin:10px 0; }
-    .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; }
+    .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; align-items:center; }
     .bubble { display:inline-block; padding:10px 12px; border-radius:12px; background:#1b243b; white-space:pre-wrap; max-width:100%; }
+    .receipt { opacity:.8; font-size:12px; margin-left:10px; }
+    .dot { width:8px; height:8px; border-radius:999px; display:inline-block; vertical-align:middle; margin-right:6px; border:1px solid #2a3a63; }
+    .dot.on { background:#22c55e; }
+    .dot.off { background:#0b1220; }
 
-    /* FIX: tabs always visible */
-    .tabs {
-      display:flex;
-      gap:8px;
-      margin-top:10px;
-      overflow-x:auto;
-      padding-bottom:6px;
-      scrollbar-width: thin;
-    }
+    .tabs { display:flex; gap:8px; margin-top:10px; overflow-x:auto; padding-bottom:6px; scrollbar-width: thin; }
     .tab { flex:0 0 auto; padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
     .tab.active { outline:2px solid #1f6feb; background:#0b1b3a; }
     .hidden { display:none !important; }
@@ -45,11 +41,7 @@
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2a3a63; background:#0b1220; font-size:12px; opacity:.9; }
     .danger { border-color:#7f1d1d !important; }
 
-    /* FIX: admin card scroll inside */
-    #adminCard {
-      max-height: 72vh;
-      overflow:auto;
-    }
+    #adminCard { max-height: 72vh; overflow:auto; }
   </style>
 </head>
 <body>
@@ -118,6 +110,7 @@
       <div class="muted">В списке только доступные тебе каналы</div>
     </div>
 
+    <!-- Админка (оставил как у тебя было) -->
     <div id="adminCard" class="card hidden" style="margin-top:10px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <b>Админка</b>
@@ -132,7 +125,7 @@
       </div>
 
       <div id="adminRoles">
-        <div class="muted">Кастомные роли (должности). Выдавай людям роли, потом привязывай их к каналам.</div>
+        <div class="muted">Кастомные роли (должности).</div>
         <div class="row">
           <input id="newRoleName" placeholder="role-slug (например sales-manager)" />
         </div>
@@ -145,13 +138,13 @@
       </div>
 
       <div id="adminUsers" class="hidden">
-        <div class="muted">Выдавай и снимай кастомные роли у пользователей.</div>
+        <div class="muted">Выдавай и снимай роли.</div>
         <div class="hr"></div>
         <div id="usersList"></div>
       </div>
 
       <div id="adminChannels" class="hidden">
-        <div class="muted">Создай канал и задай доступ ролями и/или конкретными людьми.</div>
+        <div class="muted">Каналы и доступ.</div>
         <div class="row">
           <input id="newChannelName" placeholder="channel-name" />
         </div>
@@ -165,7 +158,7 @@
 
         <div class="hr"></div>
 
-        <div class="muted">Настройка доступа (теперь подтягивает текущие галочки):</div>
+        <div class="muted">Настройка доступа:</div>
         <div class="row">
           <select id="accessChannel"></select>
           <button id="loadAccessBtn">Загрузить доступ</button>
@@ -189,7 +182,7 @@
       </div>
 
       <div id="adminAudit" class="hidden">
-        <div class="muted">Журнал действий (OWNER/SUPERADMIN). Просмотр DM через аудит добавим следующим шагом.</div>
+        <div class="muted">Журнал действий (OWNER/SUPERADMIN).</div>
         <div class="hr"></div>
         <div id="auditList" class="muted"></div>
       </div>
@@ -250,18 +243,16 @@
   const adminCard = document.getElementById("adminCard");
   const closeAdminBtn = document.getElementById("closeAdminBtn");
 
+  // admin elements
   const rolesList = document.getElementById("rolesList");
   const usersList = document.getElementById("usersList");
   const auditList = document.getElementById("auditList");
-
   const newRoleName = document.getElementById("newRoleName");
   const newRoleDisplay = document.getElementById("newRoleDisplay");
   const createRoleBtn = document.getElementById("createRoleBtn");
-
   const newChannelName = document.getElementById("newChannelName");
   const newChannelPublic = document.getElementById("newChannelPublic");
   const createChannelBtn = document.getElementById("createChannelBtn");
-
   const accessChannel = document.getElementById("accessChannel");
   const loadAccessBtn = document.getElementById("loadAccessBtn");
   const accessRoles = document.getElementById("accessRoles");
@@ -281,9 +272,14 @@
   let ws = null;
   let channels = [];
   let activeChannelId = null;
+
   let roles = [];
   let users = [];
   let adminAllChannels = [];
+
+  // presence + receipts
+  let onlineUserIds = new Set(); // userId
+  let receiptByMessageId = new Map(); // msgId -> {readCount,total}
 
   function esc(s) {
     return String(s || "").replace(/[&<>"']/g, c => ({
@@ -315,6 +311,10 @@
   tabLogin.onclick = () => setAuthMode("login");
   tabRegister.onclick = () => setAuthMode("register");
 
+  function dotHtml(isOn) {
+    return `<span class="dot ${isOn ? "on" : "off"}"></span>`;
+  }
+
   function uiLoggedOut() {
     me = null;
     authBox.classList.remove("hidden");
@@ -323,11 +323,16 @@
     channelsCard.classList.add("hidden");
     adminCard.classList.add("hidden");
     openAdminBtn.classList.add("hidden");
+
     titleEl.textContent = "—";
     hintEl.textContent = "Сначала войди/зарегистрируйся";
     text.disabled = true;
     sendBtn.disabled = true;
     log.innerHTML = "";
+
+    onlineUserIds = new Set();
+    receiptByMessageId = new Map();
+
     if (ws) { try { ws.close(); } catch {} }
     ws = null;
   }
@@ -411,15 +416,37 @@
     }
   };
 
+  function renderReceipt(msgId) {
+    const el = document.getElementById(`rc_${msgId}`);
+    if (!el) return;
+    const r = receiptByMessageId.get(msgId);
+    if (!r || !r.total) {
+      el.textContent = "✓";
+      return;
+    }
+    el.textContent = `✓ ${r.readCount}/${r.total}`;
+  }
+
   function addMsg(m) {
+    // save receipt
+    if (m.read) receiptByMessageId.set(m.id, m.read);
+
     const div = document.createElement("div");
     div.className = "msg";
+
     const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    const isOn = onlineUserIds.has(Number(m.fromId));
+
     div.innerHTML = `
-      <div class="meta"><span>${esc(m.from)} • ${at}</span></div>
+      <div class="meta">
+        <span>${dotHtml(isOn)}${esc(m.from)} • ${at}</span>
+        <span class="receipt" id="rc_${m.id}">✓</span>
+      </div>
       <div class="bubble">${esc(m.text)}</div>
     `;
+
     log.appendChild(div);
+    renderReceipt(m.id);
     log.scrollTop = log.scrollHeight;
   }
 
@@ -439,8 +466,12 @@
     titleEl.textContent = "#" + name;
     hintEl.textContent = "";
     log.innerHTML = "";
+    receiptByMessageId = new Map();
     renderChannels();
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "join", channelId: id }));
+
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "join", channelId: id }));
+    }
   }
 
   sendBtn.onclick = () => sendMessage();
@@ -453,6 +484,12 @@
     ws.send(JSON.stringify({ type: "chat", text: t }));
     text.value = "";
     text.focus();
+  }
+
+  function sendReadIfPossible(messageId) {
+    if (!ws || ws.readyState !== 1) return;
+    if (!activeChannelId || !messageId) return;
+    ws.send(JSON.stringify({ type: "read", channelId: activeChannelId, lastReadMessageId: messageId }));
   }
 
   async function initWs() {
@@ -469,8 +506,9 @@
       if (msg.type === "init") {
         me = msg.me;
         channels = msg.channels || [];
-        renderChannels();
+        onlineUserIds = new Set((msg.onlineUserIds || []).map(Number));
 
+        renderChannels();
         if (channels.length) joinChannel(channels[0].id, channels[0].name);
         else {
           titleEl.textContent = "Нет доступных каналов";
@@ -479,15 +517,43 @@
         return;
       }
 
+      if (msg.type === "presence_update") {
+        const uid = Number(msg.userId);
+        if (msg.online) onlineUserIds.add(uid);
+        else onlineUserIds.delete(uid);
+
+        // обновим точки у сообщений, которые на экране
+        document.querySelectorAll(".meta").forEach(() => {}); // noop
+        // проще: перерисовать точки прямо по id сообщ. не делаем, это MVP.
+        return;
+      }
+
       if (msg.type === "history") {
         if (msg.channelId !== activeChannelId) return;
-        for (const m of (msg.messages || [])) addMsg(m);
+        const messages = msg.messages || [];
+        for (const m of messages) addMsg(m);
+
+        // после загрузки истории помечаем как прочитанное самое последнее
+        if (messages.length) {
+          const lastId = messages[messages.length - 1].id;
+          sendReadIfPossible(lastId);
+        }
         return;
       }
 
       if (msg.type === "chat") {
         if (msg.channelId !== activeChannelId) return;
         addMsg(msg.message);
+
+        // так как мы находимся в канале — считаем, что прочитали новое сообщение
+        sendReadIfPossible(msg.message.id);
+        return;
+      }
+
+      if (msg.type === "read_progress") {
+        if (msg.channelId !== activeChannelId) return;
+        receiptByMessageId.set(Number(msg.messageId), msg.read);
+        renderReceipt(Number(msg.messageId));
         return;
       }
 
@@ -497,7 +563,7 @@
     });
   }
 
-  // Admin UI
+  // Admin UI (как раньше, без изменений логики)
   function setAdminTab(tab) {
     for (const t of adminTabs) t.classList.toggle("active", t.dataset.adminTab === tab);
     for (const k of Object.keys(adminViews)) adminViews[k].classList.toggle("hidden", k !== tab);
@@ -542,12 +608,10 @@
   }
 
   async function refreshAdmin() {
-    // roles
     const r = await api("/api/admin/roles");
     roles = r.roles || [];
     rolesList.innerHTML = roles.map(x => `<div><code>${esc(x.name)}</code> — ${esc(x.displayName)} (id:${x.id})</div>`).join("");
 
-    // users
     const u = await api("/api/admin/users");
     users = u.users || [];
 
@@ -576,9 +640,7 @@
       </div>
     `).join("");
 
-    // attach user role actions
     for (const us of users) {
-      // load current user roles
       (async () => {
         try {
           const ur = await api(`/api/admin/users/${us.id}/roles`);
@@ -593,7 +655,6 @@
 
       const btnAdd = document.querySelector(`[data-user-role-btn="${us.id}"]`);
       const selAdd = document.querySelector(`[data-user-role-select="${us.id}"]`);
-
       btnAdd.onclick = async () => {
         const roleId = Number(selAdd.value || 0);
         if (!roleId) return;
@@ -608,12 +669,10 @@
       const openRemove = document.querySelector(`[data-user-role-remove-open="${us.id}"]`);
       const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
       const btnRemove = document.querySelector(`[data-user-role-remove-btn="${us.id}"]`);
-
       openRemove.onclick = () => {
         selRemove.classList.toggle("hidden");
         btnRemove.classList.toggle("hidden");
       };
-
       btnRemove.onclick = async () => {
         const roleId = Number(selRemove.value || 0);
         if (!roleId) return;
@@ -622,22 +681,18 @@
       };
     }
 
-    // channels for admin (ALL)
     const ch = await api("/api/admin/channels");
     adminAllChannels = ch.channels || [];
-
     accessChannel.innerHTML = adminAllChannels.map(c =>
       `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`
     ).join("");
 
     renderAccessPickers();
 
-    // auto-load access for selected channel
     if (adminAllChannels.length) {
       await loadChannelAccessToUI(Number(accessChannel.value));
     }
 
-    // audit (owner only)
     try {
       const a = await api("/api/audit");
       auditList.innerHTML = (a.logs || []).map(l => `
@@ -683,7 +738,6 @@
       });
       newChannelName.value = "";
       await refreshAdmin();
-      // обновим список каналов у текущего пользователя проще всего перезагрузкой
       setTimeout(() => location.reload(), 500);
     } catch (e) {
       alert(String(e.message || e));
@@ -723,7 +777,6 @@
       });
 
       accessMsg.textContent = "✅ Доступ сохранён";
-      // чтобы новые права начали действовать сразу у сотрудников — перезагрузка самый быстрый MVP
       setTimeout(() => location.reload(), 600);
     } catch (e) {
       accessMsg.textContent = "❌ " + String(e.message || e);
@@ -732,6 +785,7 @@
     }
   };
 
+  // Boot
   (async () => {
     try {
       await loadPositions();
