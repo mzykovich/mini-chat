@@ -26,8 +26,16 @@
     .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; }
     .bubble { display:inline-block; padding:10px 12px; border-radius:12px; background:#1b243b; white-space:pre-wrap; max-width:100%; }
 
-    .tabs { display:flex; gap:8px; margin-top:10px; }
-    .tab { padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
+    /* FIX: tabs always visible */
+    .tabs {
+      display:flex;
+      gap:8px;
+      margin-top:10px;
+      overflow-x:auto;
+      padding-bottom:6px;
+      scrollbar-width: thin;
+    }
+    .tab { flex:0 0 auto; padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
     .tab.active { outline:2px solid #1f6feb; background:#0b1b3a; }
     .hidden { display:none !important; }
 
@@ -35,6 +43,13 @@
     .hr { height:1px; background:#1f2a44; margin:10px 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; font-size:12px; }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2a3a63; background:#0b1220; font-size:12px; opacity:.9; }
+    .danger { border-color:#7f1d1d !important; }
+
+    /* FIX: admin card scroll inside */
+    #adminCard {
+      max-height: 72vh;
+      overflow:auto;
+    }
   </style>
 </head>
 <body>
@@ -49,7 +64,6 @@
         <button id="logoutBtn" class="hidden">Выйти</button>
       </div>
 
-      <!-- Auth -->
       <div id="authBox" class="row" style="flex-direction:column;">
         <div class="tabs">
           <div id="tabLogin" class="tab active">Вход</div>
@@ -89,14 +103,12 @@
         </div>
       </div>
 
-      <!-- User info -->
       <div id="meBox" class="hidden" style="margin-top:10px;">
         <div><b id="meName"></b> <span class="pill" id="meRole"></span></div>
         <div class="muted" id="meEmail"></div>
       </div>
     </div>
 
-    <!-- Channels -->
     <div id="channelsCard" class="card hidden" style="margin-top:10px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <b>Каналы</b>
@@ -106,7 +118,6 @@
       <div class="muted">В списке только доступные тебе каналы</div>
     </div>
 
-    <!-- Admin -->
     <div id="adminCard" class="card hidden" style="margin-top:10px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <b>Админка</b>
@@ -123,7 +134,7 @@
       <div id="adminRoles">
         <div class="muted">Кастомные роли (должности). Выдавай людям роли, потом привязывай их к каналам.</div>
         <div class="row">
-          <input id="newRoleName" placeholder="role-slug (например manager-2)" />
+          <input id="newRoleName" placeholder="role-slug (например sales-manager)" />
         </div>
         <div class="row">
           <input id="newRoleDisplay" placeholder="Отображаемое имя (например Менеджер)" />
@@ -134,13 +145,13 @@
       </div>
 
       <div id="adminUsers" class="hidden">
-        <div class="muted">Назначай людям кастомные роли.</div>
+        <div class="muted">Выдавай и снимай кастомные роли у пользователей.</div>
         <div class="hr"></div>
         <div id="usersList"></div>
       </div>
 
       <div id="adminChannels" class="hidden">
-        <div class="muted">Создай канал и задай доступ ролями и/или конкретными людьми. Публичный канал видят все.</div>
+        <div class="muted">Создай канал и задай доступ ролями и/или конкретными людьми.</div>
         <div class="row">
           <input id="newChannelName" placeholder="channel-name" />
         </div>
@@ -151,11 +162,15 @@
           </select>
           <button id="createChannelBtn">Создать канал</button>
         </div>
+
         <div class="hr"></div>
-        <div class="muted">Настройка доступа: выбери канал, роли и пользователей.</div>
+
+        <div class="muted">Настройка доступа (теперь подтягивает текущие галочки):</div>
         <div class="row">
           <select id="accessChannel"></select>
+          <button id="loadAccessBtn">Загрузить доступ</button>
         </div>
+
         <div class="grid2">
           <div>
             <div class="muted">Роли с доступом</div>
@@ -166,6 +181,7 @@
             <div id="accessUsers"></div>
           </div>
         </div>
+
         <div class="row">
           <button id="saveAccessBtn">Сохранить доступ</button>
         </div>
@@ -196,14 +212,12 @@
 </div>
 
 <script>
-  // Elements
   const statusEl = document.getElementById("status");
   const authBox = document.getElementById("authBox");
   const meBox = document.getElementById("meBox");
   const meNameEl = document.getElementById("meName");
   const meEmailEl = document.getElementById("meEmail");
   const meRoleEl = document.getElementById("meRole");
-
   const logoutBtn = document.getElementById("logoutBtn");
 
   const tabLogin = document.getElementById("tabLogin");
@@ -236,7 +250,6 @@
   const adminCard = document.getElementById("adminCard");
   const closeAdminBtn = document.getElementById("closeAdminBtn");
 
-  // Admin elements
   const rolesList = document.getElementById("rolesList");
   const usersList = document.getElementById("usersList");
   const auditList = document.getElementById("auditList");
@@ -250,6 +263,7 @@
   const createChannelBtn = document.getElementById("createChannelBtn");
 
   const accessChannel = document.getElementById("accessChannel");
+  const loadAccessBtn = document.getElementById("loadAccessBtn");
   const accessRoles = document.getElementById("accessRoles");
   const accessUsers = document.getElementById("accessUsers");
   const saveAccessBtn = document.getElementById("saveAccessBtn");
@@ -263,25 +277,24 @@
     audit: document.getElementById("adminAudit"),
   };
 
-  // State
   let me = null;
   let ws = null;
-  let channels = []; // [{id,name,isPublic}]
+  let channels = [];
   let activeChannelId = null;
-  let activeChannelName = "";
-  let roles = []; // admin list
-  let users = []; // admin list
+  let roles = [];
+  let users = [];
+  let adminAllChannels = [];
 
   function esc(s) {
-    return String(s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+    return String(s || "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
   }
 
   async function api(path, opts) {
     const res = await fetch(path, { credentials: "include", ...opts });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) {
-      throw new Error(data.message || data.code || "Request failed");
-    }
+    if (!res.ok || data.ok === false) throw new Error(data.message || data.code || "Request failed");
     return data;
   }
 
@@ -423,14 +436,11 @@
 
   async function joinChannel(id, name) {
     activeChannelId = id;
-    activeChannelName = name;
     titleEl.textContent = "#" + name;
     hintEl.textContent = "";
     log.innerHTML = "";
     renderChannels();
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "join", channelId: id }));
-    }
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "join", channelId: id }));
   }
 
   sendBtn.onclick = () => sendMessage();
@@ -450,13 +460,8 @@
     const wsProto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${wsProto}://${location.host}`);
 
-    ws.addEventListener("open", () => {
-      statusEl.textContent = "✅ WebSocket подключен";
-    });
-
-    ws.addEventListener("close", () => {
-      statusEl.textContent = "⚠️ WebSocket отключен";
-    });
+    ws.addEventListener("open", () => { statusEl.textContent = "✅ WebSocket подключен"; });
+    ws.addEventListener("close", () => { statusEl.textContent = "⚠️ WebSocket отключен"; });
 
     ws.addEventListener("message", (ev) => {
       const msg = JSON.parse(ev.data);
@@ -466,17 +471,11 @@
         channels = msg.channels || [];
         renderChannels();
 
-        // auto join first channel
-        if (channels.length) {
-          joinChannel(channels[0].id, channels[0].name);
-        } else {
+        if (channels.length) joinChannel(channels[0].id, channels[0].name);
+        else {
           titleEl.textContent = "Нет доступных каналов";
           hintEl.textContent = "Попроси администратора выдать доступ";
         }
-        return;
-      }
-
-      if (msg.type === "joined") {
         return;
       }
 
@@ -494,19 +493,14 @@
 
       if (msg.type === "error") {
         alert(msg.message || msg.code || "Error");
-        return;
       }
     });
   }
 
   // Admin UI
   function setAdminTab(tab) {
-    for (const t of adminTabs) {
-      t.classList.toggle("active", t.dataset.adminTab === tab);
-    }
-    for (const k of Object.keys(adminViews)) {
-      adminViews[k].classList.toggle("hidden", k !== tab);
-    }
+    for (const t of adminTabs) t.classList.toggle("active", t.dataset.adminTab === tab);
+    for (const k of Object.keys(adminViews)) adminViews[k].classList.toggle("hidden", k !== tab);
   }
   adminTabs.forEach(t => t.onclick = () => setAdminTab(t.dataset.adminTab));
 
@@ -515,68 +509,6 @@
     await refreshAdmin();
   };
   closeAdminBtn.onclick = () => adminCard.classList.add("hidden");
-
-  async function refreshAdmin() {
-    // roles
-    const r = await api("/api/admin/roles");
-    roles = r.roles || [];
-    rolesList.innerHTML = roles.map(x => `<div><code>${esc(x.name)}</code> — ${esc(x.displayName)} (id:${x.id})</div>`).join("");
-
-    // users
-    const u = await api("/api/admin/users");
-    users = u.users || [];
-    usersList.innerHTML = users.map(us => `
-      <div class="card" style="margin-top:10px;">
-        <div><b>${esc(us.displayName)}</b> <span class="pill">${esc(us.systemRole)}</span></div>
-        <div class="muted">${esc(us.email)}</div>
-        <div class="row">
-          <select data-user-role-select="${us.id}">
-            <option value="">Выдать роль…</option>
-            ${roles.map(r => `<option value="${r.id}">${esc(r.displayName)}</option>`).join("")}
-          </select>
-          <button data-user-role-btn="${us.id}">Выдать</button>
-        </div>
-      </div>
-    `).join("");
-
-    for (const us of users) {
-      const btn = document.querySelector(`[data-user-role-btn="${us.id}"]`);
-      const sel = document.querySelector(`[data-user-role-select="${us.id}"]`);
-      btn.onclick = async () => {
-        const roleId = Number(sel.value || 0);
-        if (!roleId) return;
-        await api(`/api/admin/users/${us.id}/roles`, {
-          method: "POST",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify({ roleId })
-        });
-        alert("Роль выдана");
-      };
-    }
-
-    // channels list for access
-    const ch = await api("/api/channels");
-    // NOTE: /api/channels returns only accessible channels for current admin
-    // For OWNER/SUPERADMIN it will be all channels.
-    const list = ch.channels || [];
-    accessChannel.innerHTML = list.map(c => `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`).join("");
-
-    renderAccessPickers();
-
-    // audit (owner only)
-    try {
-      const a = await api("/api/audit");
-      auditList.innerHTML = (a.logs || []).map(l => `
-        <div class="card" style="margin-top:10px;">
-          <div><b>${esc(l.action)}</b> <span class="muted">${esc(new Date(l.at).toLocaleString())}</span></div>
-          <div class="muted">actor: ${esc(l.actor.displayName)} (${esc(l.actor.email)})</div>
-          <div class="muted"><code>${esc(JSON.stringify(l.meta))}</code></div>
-        </div>
-      `).join("");
-    } catch {
-      auditList.innerHTML = `<div class="muted">Аудит доступен только OWNER/SUPERADMIN</div>`;
-    }
-  }
 
   function renderAccessPickers() {
     accessRoles.innerHTML = roles.map(r => `
@@ -594,6 +526,132 @@
     `).join("");
   }
 
+  async function loadChannelAccessToUI(channelId) {
+    const a = await api(`/api/admin/channels/${channelId}/access`);
+    const roleSet = new Set((a.roleIds || []).map(Number));
+    const userSet = new Set((a.userIds || []).map(Number));
+
+    [...document.querySelectorAll("[data-access-role]")].forEach(chk => {
+      chk.checked = roleSet.has(Number(chk.dataset.accessRole));
+    });
+    [...document.querySelectorAll("[data-access-user]")].forEach(chk => {
+      chk.checked = userSet.has(Number(chk.dataset.accessUser));
+    });
+
+    accessMsg.textContent = "✅ Доступ загружен";
+  }
+
+  async function refreshAdmin() {
+    // roles
+    const r = await api("/api/admin/roles");
+    roles = r.roles || [];
+    rolesList.innerHTML = roles.map(x => `<div><code>${esc(x.name)}</code> — ${esc(x.displayName)} (id:${x.id})</div>`).join("");
+
+    // users
+    const u = await api("/api/admin/users");
+    users = u.users || [];
+
+    usersList.innerHTML = users.map(us => `
+      <div class="card" style="margin-top:10px;">
+        <div><b>${esc(us.displayName)}</b> <span class="pill">${esc(us.systemRole)}</span></div>
+        <div class="muted">${esc(us.email)}</div>
+
+        <div class="muted" id="userRoles_${us.id}">Роли: …</div>
+
+        <div class="row">
+          <select data-user-role-select="${us.id}">
+            <option value="">Выдать роль…</option>
+            ${roles.map(r => `<option value="${r.id}">${esc(r.displayName)}</option>`).join("")}
+          </select>
+          <button data-user-role-btn="${us.id}">Выдать</button>
+        </div>
+
+        <div class="row" style="flex-wrap:wrap;">
+          <button class="danger" data-user-role-remove-open="${us.id}">Снять роль…</button>
+          <select class="hidden" data-user-role-remove-select="${us.id}">
+            <option value="">Выбери роль для снятия</option>
+          </select>
+          <button class="hidden danger" data-user-role-remove-btn="${us.id}">Снять</button>
+        </div>
+      </div>
+    `).join("");
+
+    // attach user role actions
+    for (const us of users) {
+      // load current user roles
+      (async () => {
+        try {
+          const ur = await api(`/api/admin/users/${us.id}/roles`);
+          const list = ur.roles || [];
+          const label = document.getElementById(`userRoles_${us.id}`);
+          label.textContent = "Роли: " + (list.map(x => x.displayName).join(", ") || "—");
+
+          const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
+          selRemove.innerHTML = `<option value="">Выбери роль для снятия</option>` + list.map(x => `<option value="${x.id}">${esc(x.displayName)}</option>`).join("");
+        } catch {}
+      })();
+
+      const btnAdd = document.querySelector(`[data-user-role-btn="${us.id}"]`);
+      const selAdd = document.querySelector(`[data-user-role-select="${us.id}"]`);
+
+      btnAdd.onclick = async () => {
+        const roleId = Number(selAdd.value || 0);
+        if (!roleId) return;
+        await api(`/api/admin/users/${us.id}/roles`, {
+          method: "POST",
+          headers: { "Content-Type":"application/json" },
+          body: JSON.stringify({ roleId })
+        });
+        await refreshAdmin();
+      };
+
+      const openRemove = document.querySelector(`[data-user-role-remove-open="${us.id}"]`);
+      const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
+      const btnRemove = document.querySelector(`[data-user-role-remove-btn="${us.id}"]`);
+
+      openRemove.onclick = () => {
+        selRemove.classList.toggle("hidden");
+        btnRemove.classList.toggle("hidden");
+      };
+
+      btnRemove.onclick = async () => {
+        const roleId = Number(selRemove.value || 0);
+        if (!roleId) return;
+        await api(`/api/admin/users/${us.id}/roles/${roleId}`, { method: "DELETE" });
+        await refreshAdmin();
+      };
+    }
+
+    // channels for admin (ALL)
+    const ch = await api("/api/admin/channels");
+    adminAllChannels = ch.channels || [];
+
+    accessChannel.innerHTML = adminAllChannels.map(c =>
+      `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`
+    ).join("");
+
+    renderAccessPickers();
+
+    // auto-load access for selected channel
+    if (adminAllChannels.length) {
+      await loadChannelAccessToUI(Number(accessChannel.value));
+    }
+
+    // audit (owner only)
+    try {
+      const a = await api("/api/audit");
+      auditList.innerHTML = (a.logs || []).map(l => `
+        <div class="card" style="margin-top:10px;">
+          <div><b>${esc(l.action)}</b> <span class="muted">${esc(new Date(l.at).toLocaleString())}</span></div>
+          <div class="muted">actor: ${esc(l.actor.displayName)} (${esc(l.actor.email)})</div>
+          <div class="muted"><code>${esc(JSON.stringify(l.meta))}</code></div>
+        </div>
+      `).join("");
+    } catch {
+      auditList.innerHTML = `<div class="muted">Аудит доступен только OWNER/SUPERADMIN</div>`;
+    }
+  }
+
   createRoleBtn.onclick = async () => {
     createRoleBtn.disabled = true;
     try {
@@ -605,7 +663,6 @@
       newRoleName.value = "";
       newRoleDisplay.value = "";
       await refreshAdmin();
-      alert("Роль создана");
     } catch (e) {
       alert(String(e.message || e));
     } finally {
@@ -626,12 +683,29 @@
       });
       newChannelName.value = "";
       await refreshAdmin();
-      alert("Канал создан");
+      // обновим список каналов у текущего пользователя проще всего перезагрузкой
+      setTimeout(() => location.reload(), 500);
     } catch (e) {
       alert(String(e.message || e));
     } finally {
       createChannelBtn.disabled = false;
     }
+  };
+
+  loadAccessBtn.onclick = async () => {
+    accessMsg.textContent = "";
+    try {
+      await loadChannelAccessToUI(Number(accessChannel.value));
+    } catch (e) {
+      accessMsg.textContent = "❌ " + String(e.message || e);
+    }
+  };
+
+  accessChannel.onchange = async () => {
+    accessMsg.textContent = "";
+    try {
+      await loadChannelAccessToUI(Number(accessChannel.value));
+    } catch {}
   };
 
   saveAccessBtn.onclick = async () => {
@@ -647,8 +721,9 @@
         headers: { "Content-Type":"application/json" },
         body: JSON.stringify({ roleIds, userIds })
       });
+
       accessMsg.textContent = "✅ Доступ сохранён";
-      // after access change, refresh ws init by reloading page (fast MVP)
+      // чтобы новые права начали действовать сразу у сотрудников — перезагрузка самый быстрый MVP
       setTimeout(() => location.reload(), 600);
     } catch (e) {
       accessMsg.textContent = "❌ " + String(e.message || e);
@@ -657,11 +732,9 @@
     }
   };
 
-  // Boot
   (async () => {
     try {
       await loadPositions();
-      // check session
       const meResp = await api("/api/me");
       me = meResp.me;
       statusEl.textContent = "Сессия активна";
