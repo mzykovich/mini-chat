@@ -61,6 +61,7 @@ async function queryOne(sql, params) {
 ========================= */
 async function getUserBySessionToken(sessionToken) {
   if (!sessionToken) return null;
+
   const row = await queryOne(
     `SELECT u.id, u.email, u.display_name, u.system_role, u.created_at
      FROM sessions s
@@ -200,7 +201,7 @@ async function migrate() {
 
     CREATE TABLE IF NOT EXISTS roles (
       id SERIAL PRIMARY KEY,
-      name TEXT UNIQUE NOT NULL,          -- slug
+      name TEXT UNIQUE NOT NULL,
       display_name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -254,10 +255,11 @@ async function migrate() {
     );
   `);
 
-  // Upgrade older DBs safely
+  // upgrade older DBs safely
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true;`);
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
+  // seed base channel
   await pool.query(
     `INSERT INTO channels (name, is_public)
      VALUES ($1, $2)
@@ -265,6 +267,7 @@ async function migrate() {
     ["general", true]
   );
 
+  // seed default positions
   const seeds = [
     { name: "worker", display: "Рабочий" },
     { name: "manager", display: "Менеджер" },
@@ -445,7 +448,6 @@ app.get("/api/channels", requireAuth, async (req, res) => {
 });
 
 /* ===== Admin endpoints ===== */
-
 app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, email, display_name, system_role, created_at
@@ -473,7 +475,7 @@ app.get("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (_req, res) 
   });
 });
 
-// NEW: roles of a user
+// user roles list
 app.get("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   if (!userId) return fail(res, 400, "BAD_INPUT", "bad user id");
@@ -510,12 +512,13 @@ app.post("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (req, res) 
   ok(res, { role: { id: Number(row.id), name: row.name, displayName: row.display_name } });
 });
 
+// add role to user
 app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   const roleId = Number(req.body.roleId || 0);
   if (!userId || !roleId) return fail(res, 400, "BAD_INPUT", "userId/roleId required");
 
-  const target = await queryOne(`SELECT id, system_role FROM users WHERE id=$1`, [userId]);
+  const target = await queryOne(`SELECT id FROM users WHERE id=$1`, [userId]);
   if (!target) return fail(res, 404, "NOT_FOUND", "User not found");
 
   await pool.query(
@@ -529,22 +532,18 @@ app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (
   ok(res, {});
 });
 
-// NEW: remove role from user
+// remove role from user
 app.delete("/api/admin/users/:id/roles/:roleId", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   const roleId = Number(req.params.roleId);
   if (!userId || !roleId) return fail(res, 400, "BAD_INPUT", "bad ids");
 
-  await pool.query(
-    `DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`,
-    [userId, roleId]
-  );
-
+  await pool.query(`DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`, [userId, roleId]);
   await auditLog(req.user.id, "USER_ROLE_REMOVE", { userId, roleId, at: nowIso() });
   ok(res, {});
 });
 
-// NEW: list ALL channels for admin (so access editing works reliably)
+// list all channels for admin
 app.get("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
@@ -552,6 +551,7 @@ app.get("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (_req, re
   ok(res, { channels: rows.map(c => ({ id: Number(c.id), name: c.name, isPublic: c.is_public })) });
 });
 
+// create channel
 app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const name = normalizeChannelName(req.body.name);
   const isPublic = Boolean(req.body.isPublic);
@@ -569,20 +569,14 @@ app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, re
   ok(res, { channel: { id: Number(ch.id), name: ch.name, isPublic: ch.is_public } });
 });
 
-// NEW: get current access for channel
+// get channel access
 app.get("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const channelId = Number(req.params.id);
   const ch = await queryOne(`SELECT id FROM channels WHERE id=$1`, [channelId]);
   if (!ch) return fail(res, 404, "NOT_FOUND", "Channel not found");
 
-  const r = await pool.query(
-    `SELECT role_id FROM channel_role_access WHERE channel_id=$1`,
-    [channelId]
-  );
-  const u = await pool.query(
-    `SELECT user_id FROM channel_user_access WHERE channel_id=$1`,
-    [channelId]
-  );
+  const r = await pool.query(`SELECT role_id FROM channel_role_access WHERE channel_id=$1`, [channelId]);
+  const u = await pool.query(`SELECT user_id FROM channel_user_access WHERE channel_id=$1`, [channelId]);
 
   ok(res, {
     roleIds: r.rows.map(x => Number(x.role_id)),
@@ -590,6 +584,7 @@ app.get("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asyn
   });
 });
 
+// set channel access
 app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const channelId = Number(req.params.id);
   const roleIds = Array.isArray(req.body.roleIds) ? req.body.roleIds.map(Number).filter(Boolean) : [];
@@ -618,6 +613,7 @@ app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asy
   ok(res, {});
 });
 
+// transfer ownership
 app.post("/api/owner/transfer", requireAuth, requireOwner, async (req, res) => {
   const newOwnerId = Number(req.body.userId || 0);
   if (!newOwnerId) return fail(res, 400, "BAD_INPUT", "userId required");
@@ -632,6 +628,7 @@ app.post("/api/owner/transfer", requireAuth, requireOwner, async (req, res) => {
   ok(res, {});
 });
 
+// audit logs
 app.get("/api/audit", requireAuth, requireOwner, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT a.id, a.action, a.meta, a.created_at, u.email, u.display_name
@@ -661,16 +658,13 @@ async function wsGetUserFromReq(req) {
   const token = parsed.session || "";
   return await getUserBySessionToken(token);
 }
-
 function wsSend(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
-
 async function wsSendInit(ws) {
   const channels = await listAccessibleChannels(ws.user);
   wsSend(ws, { type: "init", me: ws.user, channels });
 }
-
 async function loadChannelHistory(channelId, limit = 200) {
   const { rows } = await pool.query(
     `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
@@ -689,7 +683,6 @@ async function loadChannelHistory(channelId, limit = 200) {
     from: r.display_name,
   }));
 }
-
 async function saveChannelMessage(channelId, senderUserId, text) {
   const row = await queryOne(
     `INSERT INTO channel_messages (channel_id, sender_user_id, text)
@@ -699,7 +692,6 @@ async function saveChannelMessage(channelId, senderUserId, text) {
   );
   return { id: Number(row.id), at: Number(row.at) };
 }
-
 function broadcastToChannelId(channelId, obj) {
   const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
@@ -719,6 +711,7 @@ wss.on("connection", async (ws, req) => {
   ws.isAlive = true;
 
   ws.on("pong", () => (ws.isAlive = true));
+
   await wsSendInit(ws);
 
   ws.on("message", async (buf) => {
@@ -750,10 +743,14 @@ wss.on("connection", async (ws, req) => {
       }
 
       const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000));
-      const message = { id: saved.id, at: saved.at, from: ws.user.displayName, text: text.slice(0, 2000) };
+      const message = {
+        id: saved.id,
+        at: saved.at,
+        from: ws.user.displayName,
+        text: text.slice(0, 2000),
+      };
 
       broadcastToChannelId(ws.channelId, { type: "chat", channelId: ws.channelId, message });
-      return;
     }
   });
 });
@@ -767,9 +764,22 @@ setInterval(() => {
   }
 }, 30000);
 
+/* =========================
+   START: Render-friendly
+========================= */
 const PORT = process.env.PORT || 3000;
 
+// 1) открываем порт СРАЗУ (чтобы Render увидел)
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Listening on :${PORT}`);
+});
+
+// 2) миграции запускаем после старта (и не роняем процесс)
 (async () => {
-  await migrate();
-  server.listen(PORT, () => console.log(`Listening on :${PORT}`));
+  try {
+    await migrate();
+    console.log("Migrations OK");
+  } catch (e) {
+    console.error("Migration failed:", e);
+  }
 })();
