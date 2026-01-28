@@ -39,7 +39,8 @@
     .msg { margin:10px 0; }
     .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; align-items:center; }
     .bubble { display:inline-block; padding:10px 12px; border-radius:12px; background:#1b243b; white-space:pre-wrap; max-width:100%; }
-    .receipt { opacity:.8; font-size:12px; margin-left:10px; }
+    .receipt { opacity:.8; font-size:12px; margin-left:10px; min-width:56px; text-align:right; }
+    .receipt.dim { opacity:.35; }
 
     .dot { width:8px; height:8px; border-radius:999px; display:inline-block; vertical-align:middle; border:1px solid #2a3a63; }
     .dot.on { background:#22c55e; }
@@ -339,7 +340,10 @@
 
   // presence + receipts
   let onlineUserIds = new Set();
+  // messageId -> {readCount,total}
   let receiptByMessageId = new Map();
+  // messageId -> fromId (нужно чтобы показывать receipt только для твоих)
+  let messageFromId = new Map();
 
   function esc(s) {
     return String(s || "").replace(/[&<>"']/g, c => ({
@@ -397,6 +401,7 @@
 
     onlineUserIds = new Set();
     receiptByMessageId = new Map();
+    messageFromId = new Map();
     activeMode = "channel";
     activeChannelId = null;
     activeDmChatId = null;
@@ -505,15 +510,30 @@
   function renderReceipt(msgId) {
     const el = document.getElementById(`rc_${msgId}`);
     if (!el) return;
+
+    // receipts показываем только на твоих сообщениях
+    const fromId = Number(messageFromId.get(msgId) || 0);
+    const isMine = me && fromId === Number(me.id);
+    if (!isMine) {
+      el.textContent = "";
+      el.classList.add("dim");
+      return;
+    }
+
+    el.classList.remove("dim");
+
     const r = receiptByMessageId.get(msgId);
     if (!r || !r.total) {
       el.textContent = "✓";
       return;
     }
+
+    // чтобы не путать: readCount включает и тебя, это нормально (реально прочитал = ты тоже)
     el.textContent = `✓ ${r.readCount}/${r.total}`;
   }
 
   function addMsg(m) {
+    messageFromId.set(m.id, Number(m.fromId));
     if (m.read) receiptByMessageId.set(m.id, m.read);
 
     const div = document.createElement("div");
@@ -528,7 +548,7 @@
           ${dotHtml(isOn)}
           <span class="truncate">${esc(m.from)} • ${at}</span>
         </span>
-        <span class="receipt" id="rc_${m.id}">✓</span>
+        <span class="receipt" id="rc_${m.id}"></span>
       </div>
       <div class="bubble">${esc(m.text)}</div>
     `;
@@ -592,6 +612,7 @@
     hintEl.textContent = "";
     log.innerHTML = "";
     receiptByMessageId = new Map();
+    messageFromId = new Map();
 
     renderChannels();
     renderDmListUI();
@@ -611,6 +632,7 @@
     hintEl.textContent = "";
     log.innerHTML = "";
     receiptByMessageId = new Map();
+    messageFromId = new Map();
 
     renderChannels();
     renderDmListUI();
@@ -668,7 +690,6 @@
         onlineUserIds = new Set((msg.onlineUserIds || []).map(Number));
         renderChannels();
 
-        // начнём с первого доступного канала
         if (channels.length) joinChannel(channels[0].id, channels[0].name);
         else {
           titleEl.textContent = "Нет доступных каналов";
@@ -683,38 +704,37 @@
         const uid = Number(msg.userId);
         if (msg.online) onlineUserIds.add(uid);
         else onlineUserIds.delete(uid);
+
+        // перерисуем списки чтобы точки online обновились
         renderDmListUI();
+        // в логах точка обновится только для новых сообщений — пока ок
         return;
       }
 
-      // сервер попросил обновить списки (бейджи/последние сообщения)
       if (msg.type === "refresh_lists") {
         await refreshChannels();
         await refreshDmList();
         return;
       }
 
-      // уведомление: в канале новый месседж -> обновим каналы (бейджи)
       if (msg.type === "channel_notice") {
         await refreshChannels();
         return;
       }
 
-      // уведомление по DM -> обновим список DM (бейджи)
       if (msg.type === "dm_notice") {
         await refreshDmList();
         return;
       }
 
-      // Channel history
       if (msg.type === "history") {
         if (activeMode !== "channel") return;
         if (msg.channelId !== activeChannelId) return;
+
         const messages = msg.messages || [];
         for (const m of messages) addMsg(m);
-        if (messages.length) sendReadChannelIfPossible(messages[messages.length - 1].id);
 
-        // после истории обновим каналы, чтобы бейдж стал 0
+        if (messages.length) sendReadChannelIfPossible(messages[messages.length - 1].id);
         await refreshChannels();
         return;
       }
@@ -722,19 +742,22 @@
       if (msg.type === "chat") {
         if (activeMode !== "channel") return;
         if (msg.channelId !== activeChannelId) return;
+
         addMsg(msg.message);
         sendReadChannelIfPossible(msg.message.id);
-
-        // мы в канале -> бейдж должен стать 0
         await refreshChannels();
         return;
       }
 
-      if (msg.type === "read_progress") {
+      // НОВОЕ: батч обновление receipts для хвоста
+      if (msg.type === "read_progress_batch") {
         if (activeMode !== "channel") return;
         if (msg.channelId !== activeChannelId) return;
-        receiptByMessageId.set(Number(msg.messageId), msg.read);
-        renderReceipt(Number(msg.messageId));
+
+        for (const it of (msg.items || [])) {
+          receiptByMessageId.set(Number(it.messageId), { readCount: Number(it.readCount), total: Number(it.total) });
+          renderReceipt(Number(it.messageId));
+        }
         return;
       }
 
@@ -750,8 +773,8 @@
 
         const messages = msg.messages || [];
         for (const m of messages) addMsg(m);
-        if (messages.length) sendReadDmIfPossible(messages[messages.length - 1].id);
 
+        if (messages.length) sendReadDmIfPossible(messages[messages.length - 1].id);
         await refreshDmList();
         return;
       }
@@ -775,6 +798,7 @@
       if (msg.type === "dm_read_progress") {
         if (activeMode !== "dm") return;
         if (Number(msg.chatId) !== Number(activeDmChatId)) return;
+
         receiptByMessageId.set(Number(msg.messageId), msg.read);
         renderReceipt(Number(msg.messageId));
         return;
