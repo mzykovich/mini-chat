@@ -7,26 +7,41 @@
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:#0b1220; color:#e6edf3; }
     .app { display:flex; height:100vh; }
-    .side { width:320px; padding:12px; border-right:1px solid #1f2a44; background:#0a1020; box-sizing:border-box; overflow:auto; }
+    .side { width:360px; padding:12px; border-right:1px solid #1f2a44; background:#0a1020; box-sizing:border-box; overflow:auto; }
     .main { flex:1; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; }
     .card { background:#111a2e; border:1px solid #1f2a44; border-radius:12px; padding:10px; }
     .row { display:flex; gap:10px; margin-top:10px; }
-    input, select, button, textarea { border-radius:10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding:10px; }
-    input, select, textarea { width:100%; box-sizing:border-box; }
+    input, select, button { border-radius:10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding:10px; }
+    input, select { width:100%; box-sizing:border-box; }
     button { cursor:pointer; white-space:nowrap; }
     button:disabled { opacity:.6; cursor:not-allowed; }
     .muted { opacity:.75; font-size:12px; }
     .list { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
-    .item { padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
+
+    .item {
+      padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a;
+      cursor:pointer; user-select:none;
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+    }
     .item:hover { filter:brightness(1.08); }
     .item.active { outline:2px solid #1f6feb; background:#0b1b3a; }
+
+    .leftline { display:flex; align-items:center; gap:8px; min-width:0; }
+    .truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .badge {
+      display:inline-flex; align-items:center; justify-content:center;
+      min-width:22px; height:18px; padding:0 6px;
+      border-radius:999px; border:1px solid #2a3a63;
+      background:#0b1220; font-size:12px; opacity:.95;
+    }
 
     #log { flex:1; overflow:auto; padding:12px; background:#0f172a; border-radius:12px; border:1px solid #1f2a44; margin-top:10px; }
     .msg { margin:10px 0; }
     .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; align-items:center; }
     .bubble { display:inline-block; padding:10px 12px; border-radius:12px; background:#1b243b; white-space:pre-wrap; max-width:100%; }
     .receipt { opacity:.8; font-size:12px; margin-left:10px; }
-    .dot { width:8px; height:8px; border-radius:999px; display:inline-block; vertical-align:middle; margin-right:6px; border:1px solid #2a3a63; }
+
+    .dot { width:8px; height:8px; border-radius:999px; display:inline-block; vertical-align:middle; border:1px solid #2a3a63; }
     .dot.on { background:#22c55e; }
     .dot.off { background:#0b1220; }
 
@@ -34,14 +49,13 @@
     .tab { flex:0 0 auto; padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
     .tab.active { outline:2px solid #1f6feb; background:#0b1b3a; }
     .hidden { display:none !important; }
-
-    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
     .hr { height:1px; background:#1f2a44; margin:10px 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; font-size:12px; }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2a3a63; background:#0b1220; font-size:12px; opacity:.9; }
     .danger { border-color:#7f1d1d !important; }
 
     #adminCard { max-height: 72vh; overflow:auto; }
+    .small { font-size: 12px; opacity:.85; }
   </style>
 </head>
 <body>
@@ -110,7 +124,20 @@
       <div class="muted">В списке только доступные тебе каналы</div>
     </div>
 
-    <!-- Админка (оставил как у тебя было) -->
+    <div id="dmCard" class="card hidden" style="margin-top:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <b>Личные</b>
+        <button id="newDmBtn">Новый DM</button>
+      </div>
+      <div class="row">
+        <select id="dmUserSelect" class="hidden"></select>
+        <button id="dmOpenBtn" class="hidden">Открыть</button>
+      </div>
+      <div class="list" id="dmList"></div>
+      <div class="muted">DM доступны только между пользователями этого сервера</div>
+    </div>
+
+    <!-- Админка (как раньше) -->
     <div id="adminCard" class="card hidden" style="margin-top:10px;">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <b>Админка</b>
@@ -122,6 +149,7 @@
         <div class="tab" data-admin-tab="users">Пользователи</div>
         <div class="tab" data-admin-tab="channels">Каналы</div>
         <div class="tab" data-admin-tab="audit">Аудит</div>
+        <div class="tab" data-admin-tab="dms">DM аудит</div>
       </div>
 
       <div id="adminRoles">
@@ -164,12 +192,12 @@
           <button id="loadAccessBtn">Загрузить доступ</button>
         </div>
 
-        <div class="grid2">
-          <div>
+        <div class="row">
+          <div style="flex:1">
             <div class="muted">Роли с доступом</div>
             <div id="accessRoles"></div>
           </div>
-          <div>
+          <div style="flex:1">
             <div class="muted">Пользователи с доступом</div>
             <div id="accessUsers"></div>
           </div>
@@ -185,6 +213,18 @@
         <div class="muted">Журнал действий (OWNER/SUPERADMIN).</div>
         <div class="hr"></div>
         <div id="auditList" class="muted"></div>
+      </div>
+
+      <div id="adminDms" class="hidden">
+        <div class="muted">Просмотр личных сообщений (OWNER/SUPERADMIN). Каждый просмотр логируется в аудит.</div>
+        <div class="hr"></div>
+        <div class="row">
+          <select id="dmAuditSelect"></select>
+          <button id="dmAuditLoadBtn">Открыть</button>
+        </div>
+        <div id="dmAuditLog" class="small"></div>
+        <div class="hr"></div>
+        <div id="dmAuditMessages"></div>
       </div>
     </div>
   </div>
@@ -232,6 +272,13 @@
 
   const channelsCard = document.getElementById("channelsCard");
   const channelsEl = document.getElementById("channels");
+
+  const dmCard = document.getElementById("dmCard");
+  const dmListEl = document.getElementById("dmList");
+  const newDmBtn = document.getElementById("newDmBtn");
+  const dmUserSelect = document.getElementById("dmUserSelect");
+  const dmOpenBtn = document.getElementById("dmOpenBtn");
+
   const titleEl = document.getElementById("title");
   const hintEl = document.getElementById("hint");
 
@@ -243,7 +290,7 @@
   const adminCard = document.getElementById("adminCard");
   const closeAdminBtn = document.getElementById("closeAdminBtn");
 
-  // admin elements
+  // admin
   const rolesList = document.getElementById("rolesList");
   const usersList = document.getElementById("usersList");
   const auditList = document.getElementById("auditList");
@@ -260,26 +307,39 @@
   const saveAccessBtn = document.getElementById("saveAccessBtn");
   const accessMsg = document.getElementById("accessMsg");
 
+  // admin DM audit
+  const dmAuditSelect = document.getElementById("dmAuditSelect");
+  const dmAuditLoadBtn = document.getElementById("dmAuditLoadBtn");
+  const dmAuditLog = document.getElementById("dmAuditLog");
+  const dmAuditMessages = document.getElementById("dmAuditMessages");
+
   const adminTabs = [...document.querySelectorAll("[data-admin-tab]")];
   const adminViews = {
     roles: document.getElementById("adminRoles"),
     users: document.getElementById("adminUsers"),
     channels: document.getElementById("adminChannels"),
     audit: document.getElementById("adminAudit"),
+    dms: document.getElementById("adminDms"),
   };
 
   let me = null;
   let ws = null;
-  let channels = [];
+
+  let channels = [];             // {id,name,isPublic,unreadCount,lastMessageId}
+  let dmChats = [];              // {id,otherUser,unreadCount,lastMessageId,last...}
+
+  let activeMode = "channel";    // channel | dm
   let activeChannelId = null;
+  let activeDmChatId = null;
+  let activeDmOther = null;
 
   let roles = [];
   let users = [];
   let adminAllChannels = [];
 
   // presence + receipts
-  let onlineUserIds = new Set(); // userId
-  let receiptByMessageId = new Map(); // msgId -> {readCount,total}
+  let onlineUserIds = new Set();
+  let receiptByMessageId = new Map();
 
   function esc(s) {
     return String(s || "").replace(/[&<>"']/g, c => ({
@@ -292,6 +352,15 @@
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) throw new Error(data.message || data.code || "Request failed");
     return data;
+  }
+
+  function dotHtml(isOn) {
+    return `<span class="dot ${isOn ? "on" : "off"}"></span>`;
+  }
+
+  function badgeHtml(n) {
+    if (!n || n <= 0) return "";
+    return `<span class="badge">${n > 99 ? "99+" : n}</span>`;
   }
 
   function setAuthMode(mode) {
@@ -307,13 +376,8 @@
       loginForm.classList.add("hidden");
     }
   }
-
   tabLogin.onclick = () => setAuthMode("login");
   tabRegister.onclick = () => setAuthMode("register");
-
-  function dotHtml(isOn) {
-    return `<span class="dot ${isOn ? "on" : "off"}"></span>`;
-  }
 
   function uiLoggedOut() {
     me = null;
@@ -321,6 +385,7 @@
     meBox.classList.add("hidden");
     logoutBtn.classList.add("hidden");
     channelsCard.classList.add("hidden");
+    dmCard.classList.add("hidden");
     adminCard.classList.add("hidden");
     openAdminBtn.classList.add("hidden");
 
@@ -332,6 +397,9 @@
 
     onlineUserIds = new Set();
     receiptByMessageId = new Map();
+    activeMode = "channel";
+    activeChannelId = null;
+    activeDmChatId = null;
 
     if (ws) { try { ws.close(); } catch {} }
     ws = null;
@@ -342,7 +410,9 @@
     meBox.classList.remove("hidden");
     logoutBtn.classList.remove("hidden");
     channelsCard.classList.remove("hidden");
-    hintEl.textContent = "Выбери канал слева";
+    dmCard.classList.remove("hidden");
+
+    hintEl.textContent = "Выбери канал или DM слева";
     text.disabled = false;
     sendBtn.disabled = false;
 
@@ -371,6 +441,18 @@
     }
   }
 
+  async function refreshChannels() {
+    const data = await api("/api/channels");
+    channels = data.channels || [];
+    renderChannels();
+  }
+
+  async function refreshDmList() {
+    const data = await api("/api/dm");
+    dmChats = data.chats || [];
+    renderDmListUI();
+  }
+
   loginBtn.onclick = async () => {
     loginMsg.textContent = "";
     loginBtn.disabled = true;
@@ -384,6 +466,8 @@
       statusEl.textContent = "Вошёл";
       uiLoggedIn();
       await initWs();
+      await refreshChannels();
+      await refreshDmList();
     } catch (e) {
       loginMsg.textContent = String(e.message || e);
     } finally {
@@ -409,6 +493,8 @@
       statusEl.textContent = "Зарегистрирован";
       uiLoggedIn();
       await initWs();
+      await refreshChannels();
+      await refreshDmList();
     } catch (e) {
       registerMsg.textContent = String(e.message || e);
     } finally {
@@ -428,7 +514,6 @@
   }
 
   function addMsg(m) {
-    // save receipt
     if (m.read) receiptByMessageId.set(m.id, m.read);
 
     const div = document.createElement("div");
@@ -439,12 +524,14 @@
 
     div.innerHTML = `
       <div class="meta">
-        <span>${dotHtml(isOn)}${esc(m.from)} • ${at}</span>
+        <span style="display:flex; gap:8px; align-items:center;">
+          ${dotHtml(isOn)}
+          <span class="truncate">${esc(m.from)} • ${at}</span>
+        </span>
         <span class="receipt" id="rc_${m.id}">✓</span>
       </div>
       <div class="bubble">${esc(m.text)}</div>
     `;
-
     log.appendChild(div);
     renderReceipt(m.id);
     log.scrollTop = log.scrollHeight;
@@ -453,43 +540,115 @@
   function renderChannels() {
     channelsEl.innerHTML = "";
     for (const ch of channels) {
+      const active = (activeMode === "channel" && ch.id === activeChannelId);
       const el = document.createElement("div");
-      el.className = "item" + (ch.id === activeChannelId ? " active" : "");
-      el.textContent = "#" + ch.name + (ch.isPublic ? "" : " 🔒");
+      el.className = "item" + (active ? " active" : "");
+
+      const name = "#" + ch.name + (ch.isPublic ? "" : " 🔒");
+      const unread = badgeHtml(ch.unreadCount);
+
+      el.innerHTML = `
+        <div class="leftline">
+          <span class="truncate">${esc(name)}</span>
+        </div>
+        ${unread}
+      `;
+
       el.onclick = () => joinChannel(ch.id, ch.name);
       channelsEl.appendChild(el);
     }
   }
 
+  function renderDmListUI() {
+    dmListEl.innerHTML = "";
+    for (const c of dmChats) {
+      const isOn = onlineUserIds.has(Number(c.otherUser.id));
+      const active = (activeMode === "dm" && Number(c.id) === Number(activeDmChatId));
+      const el = document.createElement("div");
+      el.className = "item" + (active ? " active" : "");
+
+      const last = c.last ? ` — ${c.last.text}` : "";
+      const unread = badgeHtml(c.unreadCount);
+
+      el.innerHTML = `
+        <div class="leftline" style="min-width:0;">
+          ${dotHtml(isOn)}
+          <div class="truncate"><b>${esc(c.otherUser.displayName)}</b><span class="muted">${esc(last).slice(0, 40)}${(last.length>40)?"…":""}</span></div>
+        </div>
+        ${unread}
+      `;
+      el.onclick = () => openDmChat(c.id, c.otherUser);
+      dmListEl.appendChild(el);
+    }
+  }
+
   async function joinChannel(id, name) {
+    activeMode = "channel";
     activeChannelId = id;
+    activeDmChatId = null;
+    activeDmOther = null;
+
     titleEl.textContent = "#" + name;
     hintEl.textContent = "";
     log.innerHTML = "";
     receiptByMessageId = new Map();
+
     renderChannels();
+    renderDmListUI();
 
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({ type: "join", channelId: id }));
     }
   }
 
+  async function openDmChat(chatId, otherUser) {
+    activeMode = "dm";
+    activeDmChatId = Number(chatId);
+    activeDmOther = otherUser || null;
+    activeChannelId = null;
+
+    titleEl.textContent = `DM: ${otherUser ? otherUser.displayName : ("#" + chatId)}`;
+    hintEl.textContent = "";
+    log.innerHTML = "";
+    receiptByMessageId = new Map();
+
+    renderChannels();
+    renderDmListUI();
+
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "dm_join", chatId: Number(chatId) }));
+    }
+  }
+
   sendBtn.onclick = () => sendMessage();
   text.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMessage(); });
+
+  function sendReadChannelIfPossible(messageId) {
+    if (!ws || ws.readyState !== 1) return;
+    if (!activeChannelId || !messageId) return;
+    ws.send(JSON.stringify({ type: "read", channelId: activeChannelId, lastReadMessageId: messageId }));
+  }
+  function sendReadDmIfPossible(messageId) {
+    if (!ws || ws.readyState !== 1) return;
+    if (!activeDmChatId || !messageId) return;
+    ws.send(JSON.stringify({ type: "dm_read", chatId: activeDmChatId, lastReadMessageId: messageId }));
+  }
 
   function sendMessage() {
     const t = text.value.trim();
     if (!t) return;
-    if (!ws || ws.readyState !== 1 || !activeChannelId) return;
-    ws.send(JSON.stringify({ type: "chat", text: t }));
+    if (!ws || ws.readyState !== 1) return;
+
+    if (activeMode === "channel") {
+      if (!activeChannelId) return;
+      ws.send(JSON.stringify({ type: "chat", text: t }));
+    } else if (activeMode === "dm") {
+      if (!activeDmChatId) return;
+      ws.send(JSON.stringify({ type: "dm_chat", text: t }));
+    } else return;
+
     text.value = "";
     text.focus();
-  }
-
-  function sendReadIfPossible(messageId) {
-    if (!ws || ws.readyState !== 1) return;
-    if (!activeChannelId || !messageId) return;
-    ws.send(JSON.stringify({ type: "read", channelId: activeChannelId, lastReadMessageId: messageId }));
   }
 
   async function initWs() {
@@ -500,20 +659,23 @@
     ws.addEventListener("open", () => { statusEl.textContent = "✅ WebSocket подключен"; });
     ws.addEventListener("close", () => { statusEl.textContent = "⚠️ WebSocket отключен"; });
 
-    ws.addEventListener("message", (ev) => {
+    ws.addEventListener("message", async (ev) => {
       const msg = JSON.parse(ev.data);
 
       if (msg.type === "init") {
         me = msg.me;
         channels = msg.channels || [];
         onlineUserIds = new Set((msg.onlineUserIds || []).map(Number));
-
         renderChannels();
+
+        // начнём с первого доступного канала
         if (channels.length) joinChannel(channels[0].id, channels[0].name);
         else {
           titleEl.textContent = "Нет доступных каналов";
           hintEl.textContent = "Попроси администратора выдать доступ";
         }
+
+        await refreshDmList();
         return;
       }
 
@@ -521,37 +683,98 @@
         const uid = Number(msg.userId);
         if (msg.online) onlineUserIds.add(uid);
         else onlineUserIds.delete(uid);
-
-        // обновим точки у сообщений, которые на экране
-        document.querySelectorAll(".meta").forEach(() => {}); // noop
-        // проще: перерисовать точки прямо по id сообщ. не делаем, это MVP.
+        renderDmListUI();
         return;
       }
 
+      // сервер попросил обновить списки (бейджи/последние сообщения)
+      if (msg.type === "refresh_lists") {
+        await refreshChannels();
+        await refreshDmList();
+        return;
+      }
+
+      // уведомление: в канале новый месседж -> обновим каналы (бейджи)
+      if (msg.type === "channel_notice") {
+        await refreshChannels();
+        return;
+      }
+
+      // уведомление по DM -> обновим список DM (бейджи)
+      if (msg.type === "dm_notice") {
+        await refreshDmList();
+        return;
+      }
+
+      // Channel history
       if (msg.type === "history") {
+        if (activeMode !== "channel") return;
         if (msg.channelId !== activeChannelId) return;
         const messages = msg.messages || [];
         for (const m of messages) addMsg(m);
+        if (messages.length) sendReadChannelIfPossible(messages[messages.length - 1].id);
 
-        // после загрузки истории помечаем как прочитанное самое последнее
-        if (messages.length) {
-          const lastId = messages[messages.length - 1].id;
-          sendReadIfPossible(lastId);
-        }
+        // после истории обновим каналы, чтобы бейдж стал 0
+        await refreshChannels();
         return;
       }
 
       if (msg.type === "chat") {
+        if (activeMode !== "channel") return;
         if (msg.channelId !== activeChannelId) return;
         addMsg(msg.message);
+        sendReadChannelIfPossible(msg.message.id);
 
-        // так как мы находимся в канале — считаем, что прочитали новое сообщение
-        sendReadIfPossible(msg.message.id);
+        // мы в канале -> бейдж должен стать 0
+        await refreshChannels();
         return;
       }
 
       if (msg.type === "read_progress") {
+        if (activeMode !== "channel") return;
         if (msg.channelId !== activeChannelId) return;
+        receiptByMessageId.set(Number(msg.messageId), msg.read);
+        renderReceipt(Number(msg.messageId));
+        return;
+      }
+
+      // DM history
+      if (msg.type === "dm_history") {
+        if (activeMode !== "dm") return;
+        if (Number(msg.chatId) !== Number(activeDmChatId)) return;
+
+        if (msg.otherUser) {
+          activeDmOther = msg.otherUser;
+          titleEl.textContent = `DM: ${activeDmOther.displayName}`;
+        }
+
+        const messages = msg.messages || [];
+        for (const m of messages) addMsg(m);
+        if (messages.length) sendReadDmIfPossible(messages[messages.length - 1].id);
+
+        await refreshDmList();
+        return;
+      }
+
+      if (msg.type === "dm_chat") {
+        if (activeMode !== "dm") {
+          await refreshDmList();
+          return;
+        }
+        if (Number(msg.chatId) !== Number(activeDmChatId)) {
+          await refreshDmList();
+          return;
+        }
+
+        addMsg(msg.message);
+        sendReadDmIfPossible(msg.message.id);
+        await refreshDmList();
+        return;
+      }
+
+      if (msg.type === "dm_read_progress") {
+        if (activeMode !== "dm") return;
+        if (Number(msg.chatId) !== Number(activeDmChatId)) return;
         receiptByMessageId.set(Number(msg.messageId), msg.read);
         renderReceipt(Number(msg.messageId));
         return;
@@ -563,7 +786,37 @@
     });
   }
 
-  // Admin UI (как раньше, без изменений логики)
+  /* =======================
+     DM create flow
+  ======================= */
+  newDmBtn.onclick = async () => {
+    dmUserSelect.classList.toggle("hidden");
+    dmOpenBtn.classList.toggle("hidden");
+    if (!dmUserSelect.classList.contains("hidden") && dmUserSelect.options.length === 0) {
+      const data = await api("/api/users");
+      dmUserSelect.innerHTML = `<option value="">Выбери пользователя…</option>` + (data.users || [])
+        .map(u => `<option value="${u.id}">${esc(u.displayName)} (${esc(u.email)})</option>`).join("");
+    }
+  };
+
+  dmOpenBtn.onclick = async () => {
+    const uid = Number(dmUserSelect.value || 0);
+    if (!uid) return;
+    const opened = await api("/api/dm/open", {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify({ userId: uid })
+    });
+    await refreshDmList();
+
+    const chat = dmChats.find(c => Number(c.id) === Number(opened.chatId));
+    if (chat) openDmChat(chat.id, chat.otherUser);
+    else openDmChat(opened.chatId, null);
+  };
+
+  /* =======================
+     Admin UI (как раньше)
+  ======================= */
   function setAdminTab(tab) {
     for (const t of adminTabs) t.classList.toggle("active", t.dataset.adminTab === tab);
     for (const k of Object.keys(adminViews)) adminViews[k].classList.toggle("hidden", k !== tab);
@@ -596,14 +849,8 @@
     const a = await api(`/api/admin/channels/${channelId}/access`);
     const roleSet = new Set((a.roleIds || []).map(Number));
     const userSet = new Set((a.userIds || []).map(Number));
-
-    [...document.querySelectorAll("[data-access-role]")].forEach(chk => {
-      chk.checked = roleSet.has(Number(chk.dataset.accessRole));
-    });
-    [...document.querySelectorAll("[data-access-user]")].forEach(chk => {
-      chk.checked = userSet.has(Number(chk.dataset.accessUser));
-    });
-
+    [...document.querySelectorAll("[data-access-role]")].forEach(chk => chk.checked = roleSet.has(Number(chk.dataset.accessRole)));
+    [...document.querySelectorAll("[data-access-user]")].forEach(chk => chk.checked = userSet.has(Number(chk.dataset.accessUser)));
     accessMsg.textContent = "✅ Доступ загружен";
   }
 
@@ -614,17 +861,14 @@
 
     const u = await api("/api/admin/users");
     users = u.users || [];
-
     usersList.innerHTML = users.map(us => `
       <div class="card" style="margin-top:10px;">
         <div><b>${esc(us.displayName)}</b> <span class="pill">${esc(us.systemRole)}</span></div>
         <div class="muted">${esc(us.email)}</div>
-
         <div class="muted" id="userRoles_${us.id}">Роли: …</div>
 
         <div class="row">
-          <select data-user-role-select="${us.id}">
-            <option value="">Выдать роль…</option>
+          <select data-user-role-select="${us.id}"><option value="">Выдать роль…</option>
             ${roles.map(r => `<option value="${r.id}">${esc(r.displayName)}</option>`).join("")}
           </select>
           <button data-user-role-btn="${us.id}">Выдать</button>
@@ -632,9 +876,7 @@
 
         <div class="row" style="flex-wrap:wrap;">
           <button class="danger" data-user-role-remove-open="${us.id}">Снять роль…</button>
-          <select class="hidden" data-user-role-remove-select="${us.id}">
-            <option value="">Выбери роль для снятия</option>
-          </select>
+          <select class="hidden" data-user-role-remove-select="${us.id}"><option value="">Выбери роль</option></select>
           <button class="hidden danger" data-user-role-remove-btn="${us.id}">Снять</button>
         </div>
       </div>
@@ -647,7 +889,6 @@
           const list = ur.roles || [];
           const label = document.getElementById(`userRoles_${us.id}`);
           label.textContent = "Роли: " + (list.map(x => x.displayName).join(", ") || "—");
-
           const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
           selRemove.innerHTML = `<option value="">Выбери роль для снятия</option>` + list.map(x => `<option value="${x.id}">${esc(x.displayName)}</option>`).join("");
         } catch {}
@@ -658,21 +899,14 @@
       btnAdd.onclick = async () => {
         const roleId = Number(selAdd.value || 0);
         if (!roleId) return;
-        await api(`/api/admin/users/${us.id}/roles`, {
-          method: "POST",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify({ roleId })
-        });
+        await api(`/api/admin/users/${us.id}/roles`, { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ roleId })});
         await refreshAdmin();
       };
 
       const openRemove = document.querySelector(`[data-user-role-remove-open="${us.id}"]`);
       const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
       const btnRemove = document.querySelector(`[data-user-role-remove-btn="${us.id}"]`);
-      openRemove.onclick = () => {
-        selRemove.classList.toggle("hidden");
-        btnRemove.classList.toggle("hidden");
-      };
+      openRemove.onclick = () => { selRemove.classList.toggle("hidden"); btnRemove.classList.toggle("hidden"); };
       btnRemove.onclick = async () => {
         const roleId = Number(selRemove.value || 0);
         if (!roleId) return;
@@ -683,15 +917,9 @@
 
     const ch = await api("/api/admin/channels");
     adminAllChannels = ch.channels || [];
-    accessChannel.innerHTML = adminAllChannels.map(c =>
-      `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`
-    ).join("");
-
+    accessChannel.innerHTML = adminAllChannels.map(c => `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`).join("");
     renderAccessPickers();
-
-    if (adminAllChannels.length) {
-      await loadChannelAccessToUI(Number(accessChannel.value));
-    }
+    if (adminAllChannels.length) await loadChannelAccessToUI(Number(accessChannel.value));
 
     try {
       const a = await api("/api/audit");
@@ -705,61 +933,54 @@
     } catch {
       auditList.innerHTML = `<div class="muted">Аудит доступен только OWNER/SUPERADMIN</div>`;
     }
+
+    try {
+      const d = await api("/api/admin/dm/chats");
+      const chats = d.chats || [];
+      dmAuditSelect.innerHTML = chats.map(c => {
+        const last = c.last ? ` — ${esc(c.last.text).slice(0, 30)}${c.last.text.length > 30 ? "…" : ""}` : "";
+        return `<option value="${c.id}">${esc(c.a.displayName)} ↔ ${esc(c.b.displayName)}${last}</option>`;
+      }).join("");
+      dmAuditLog.textContent = chats.length ? "Выбери диалог и нажми «Открыть»." : "Пока нет личных диалогов.";
+      dmAuditMessages.innerHTML = "";
+    } catch {
+      dmAuditSelect.innerHTML = `<option value="">Недоступно</option>`;
+      dmAuditLog.textContent = "DM аудит доступен только OWNER/SUPERADMIN";
+      dmAuditMessages.innerHTML = "";
+    }
   }
 
   createRoleBtn.onclick = async () => {
     createRoleBtn.disabled = true;
     try {
-      await api("/api/admin/roles", {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ name: newRoleName.value, displayName: newRoleDisplay.value })
-      });
+      await api("/api/admin/roles", { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ name: newRoleName.value, displayName: newRoleDisplay.value })});
       newRoleName.value = "";
       newRoleDisplay.value = "";
       await refreshAdmin();
-    } catch (e) {
-      alert(String(e.message || e));
-    } finally {
-      createRoleBtn.disabled = false;
-    }
+    } catch (e) { alert(String(e.message || e)); }
+    finally { createRoleBtn.disabled = false; }
   };
 
   createChannelBtn.onclick = async () => {
     createChannelBtn.disabled = true;
     try {
-      await api("/api/admin/channels", {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({
-          name: newChannelName.value,
-          isPublic: newChannelPublic.value === "true"
-        })
-      });
+      await api("/api/admin/channels", { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ name: newChannelName.value, isPublic: newChannelPublic.value === "true" })});
       newChannelName.value = "";
       await refreshAdmin();
-      setTimeout(() => location.reload(), 500);
-    } catch (e) {
-      alert(String(e.message || e));
-    } finally {
-      createChannelBtn.disabled = false;
-    }
+      await refreshChannels();
+    } catch (e) { alert(String(e.message || e)); }
+    finally { createChannelBtn.disabled = false; }
   };
 
   loadAccessBtn.onclick = async () => {
     accessMsg.textContent = "";
-    try {
-      await loadChannelAccessToUI(Number(accessChannel.value));
-    } catch (e) {
-      accessMsg.textContent = "❌ " + String(e.message || e);
-    }
+    try { await loadChannelAccessToUI(Number(accessChannel.value)); }
+    catch (e) { accessMsg.textContent = "❌ " + String(e.message || e); }
   };
 
   accessChannel.onchange = async () => {
     accessMsg.textContent = "";
-    try {
-      await loadChannelAccessToUI(Number(accessChannel.value));
-    } catch {}
+    try { await loadChannelAccessToUI(Number(accessChannel.value)); } catch {}
   };
 
   saveAccessBtn.onclick = async () => {
@@ -769,15 +990,9 @@
       const channelId = Number(accessChannel.value || 0);
       const roleIds = [...document.querySelectorAll("[data-access-role]")].filter(x => x.checked).map(x => Number(x.dataset.accessRole));
       const userIds = [...document.querySelectorAll("[data-access-user]")].filter(x => x.checked).map(x => Number(x.dataset.accessUser));
-
-      await api(`/api/admin/channels/${channelId}/access`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ roleIds, userIds })
-      });
-
+      await api(`/api/admin/channels/${channelId}/access`, { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ roleIds, userIds })});
       accessMsg.textContent = "✅ Доступ сохранён";
-      setTimeout(() => location.reload(), 600);
+      await refreshChannels();
     } catch (e) {
       accessMsg.textContent = "❌ " + String(e.message || e);
     } finally {
@@ -785,7 +1000,32 @@
     }
   };
 
-  // Boot
+  dmAuditLoadBtn.onclick = async () => {
+    const chatId = Number(dmAuditSelect.value || 0);
+    if (!chatId) return;
+    dmAuditLog.textContent = "Загрузка…";
+    dmAuditMessages.innerHTML = "";
+    try {
+      const data = await api(`/api/admin/dm/chats/${chatId}/messages`);
+      const msgs = data.messages || [];
+      dmAuditLog.textContent = `Сообщений: ${msgs.length}. Просмотр залогирован в аудит.`;
+      dmAuditMessages.innerHTML = msgs.map(m => {
+        const at = new Date(m.at).toLocaleString();
+        return `
+          <div class="card" style="margin-top:10px;">
+            <div class="muted">${esc(m.from)} (${esc(m.fromEmail)}) • ${esc(at)}</div>
+            <div>${esc(m.text)}</div>
+          </div>
+        `;
+      }).join("");
+    } catch (e) {
+      dmAuditLog.textContent = "❌ " + String(e.message || e);
+    }
+  };
+
+  /* =======================
+     Boot
+  ======================= */
   (async () => {
     try {
       await loadPositions();
@@ -794,6 +1034,8 @@
       statusEl.textContent = "Сессия активна";
       uiLoggedIn();
       await initWs();
+      await refreshChannels();
+      await refreshDmList();
     } catch {
       statusEl.textContent = "Нужно войти";
       uiLoggedOut();
