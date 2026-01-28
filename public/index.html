@@ -101,6 +101,9 @@
             <input id="regPass" placeholder="Пароль (мин 6 символов)" type="password" />
           </div>
           <div class="row">
+            <input id="regInvite" placeholder="Инвайт-код (обязателен)" />
+          </div>
+          <div class="row">
             <select id="regPosition"></select>
           </div>
           <div class="row">
@@ -151,6 +154,7 @@
         <div class="tab" data-admin-tab="channels">Каналы</div>
         <div class="tab" data-admin-tab="audit">Аудит</div>
         <div class="tab" data-admin-tab="dms">DM аудит</div>
+        <div class="tab" data-admin-tab="invites">Инвайты</div>
       </div>
 
       <div id="adminRoles">
@@ -227,6 +231,27 @@
         <div class="hr"></div>
         <div id="dmAuditMessages"></div>
       </div>
+
+      <div id="adminInvites" class="hidden">
+        <div class="muted">Инвайты для регистрации (ADMIN/OWNER). Регистрация без инвайта доступна только первому пользователю (OWNER).</div>
+        <div class="hr"></div>
+
+        <div class="row">
+          <input id="inviteMaxUses" placeholder="Макс. использований (например 1)" />
+          <input id="inviteExpiresHours" placeholder="Срок (часов, 0 = без срока)" />
+          <button id="inviteCreateBtn">Создать инвайт</button>
+        </div>
+        <div class="row" style="flex-wrap:wrap; gap:8px;">
+          <button id="inviteQuick1">Быстрый: 1 раз</button>
+          <button id="inviteQuick24">Быстрый: 1 раз / 24ч</button>
+          <button id="inviteQuick10">Быстрый: 10 раз</button>
+        </div>
+        <div class="muted" id="inviteMsg"></div>
+
+        <div class="hr"></div>
+        <div id="invitesList" class="small"></div>
+      </div>
+
     </div>
   </div>
 
@@ -267,6 +292,7 @@
   const regName = document.getElementById("regName");
   const regEmail = document.getElementById("regEmail");
   const regPass = document.getElementById("regPass");
+  const regInvite = document.getElementById("regInvite");
   const regPosition = document.getElementById("regPosition");
   const registerBtn = document.getElementById("registerBtn");
   const registerMsg = document.getElementById("registerMsg");
@@ -314,6 +340,16 @@
   const dmAuditLog = document.getElementById("dmAuditLog");
   const dmAuditMessages = document.getElementById("dmAuditMessages");
 
+  // admin invites
+  const inviteMaxUses = document.getElementById("inviteMaxUses");
+  const inviteExpiresHours = document.getElementById("inviteExpiresHours");
+  const inviteCreateBtn = document.getElementById("inviteCreateBtn");
+  const inviteMsg = document.getElementById("inviteMsg");
+  const invitesList = document.getElementById("invitesList");
+  const inviteQuick1 = document.getElementById("inviteQuick1");
+  const inviteQuick24 = document.getElementById("inviteQuick24");
+  const inviteQuick10 = document.getElementById("inviteQuick10");
+
   const adminTabs = [...document.querySelectorAll("[data-admin-tab]")];
   const adminViews = {
     roles: document.getElementById("adminRoles"),
@@ -321,10 +357,13 @@
     channels: document.getElementById("adminChannels"),
     audit: document.getElementById("adminAudit"),
     dms: document.getElementById("adminDms"),
+    invites: document.getElementById("adminInvites"),
   };
 
   let me = null;
   let ws = null;
+
+  let hasInviteParam = false;
 
   let channels = [];             // {id,name,isPublic,unreadCount,lastMessageId}
   let dmChats = [];              // {id,otherUser,unreadCount,lastMessageId,last...}
@@ -344,6 +383,26 @@
   let receiptByMessageId = new Map();
   // messageId -> fromId (нужно чтобы показывать receipt только для твоих)
   let messageFromId = new Map();
+
+  function updateHeaderStatus() {
+    // Канал: показываем сколько пользователей онлайн в целом (на сервере)
+    if (activeMode === "channel") {
+      if (activeChannelId) {
+        hintEl.textContent = `онлайн: ${onlineUserIds.size}`;
+      }
+      return;
+    }
+    // DM: показываем онлайн/оффлайн собеседника
+    if (activeMode === "dm") {
+      if (activeDmOther && activeDmOther.id) {
+        const isOn = onlineUserIds.has(Number(activeDmOther.id));
+        hintEl.textContent = isOn ? "в сети" : "не в сети";
+      }
+      return;
+    }
+    // default
+    // hintEl.textContent stays as is
+  }
 
   function esc(s) {
     return String(s || "").replace(/[&<>"']/g, c => ({
@@ -367,7 +426,40 @@
     return `<span class="badge">${n > 99 ? "99+" : n}</span>`;
   }
 
+  async function createInviteAndCopy(maxUses, expiresInHours) {
+    inviteMsg.textContent = "";
+    inviteCreateBtn.disabled = true;
+    try {
+      const resp = await api("/api/admin/invites", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ maxUses, expiresInHours })
+      });
+      const token = resp.invite?.token;
+      if (!token) throw new Error("Не удалось создать инвайт");
+      const link = `${location.origin}/?invite=${token}`;
+
+      try {
+        await navigator.clipboard.writeText(link);
+        inviteMsg.textContent = "✅ Инвайт создан и ссылка скопирована";
+      } catch {
+        inviteMsg.textContent = "✅ Инвайт создан. Скопируй ссылку: " + link;
+      }
+
+      await refreshAdmin();
+    } catch (e) {
+      inviteMsg.textContent = "❌ " + String(e.message || e);
+    } finally {
+      inviteCreateBtn.disabled = false;
+    }
+  }
+
+
   function setAuthMode(mode) {
+    if (!hasInviteParam && mode === "register") {
+      // регистрация только по инвайту (ссылка вида ?invite=...)
+      return;
+    }
     if (mode === "login") {
       tabLogin.classList.add("active");
       tabRegister.classList.remove("active");
@@ -408,6 +500,10 @@
 
     if (ws) { try { ws.close(); } catch {} }
     ws = null;
+
+    // регистрация только по инвайту
+    tabRegister.classList.toggle("hidden", !hasInviteParam);
+
   }
 
   function uiLoggedIn() {
@@ -427,7 +523,31 @@
 
     const canAdmin = (me.systemRole === "OWNER" || me.systemRole === "ADMIN" || me.isSuperadmin);
     openAdminBtn.classList.toggle("hidden", !canAdmin);
+    applyAdminTabPermissions();
   }
+
+  function applyAdminTabPermissions() {
+    const canOwnerView = (me && (me.systemRole === "OWNER" || me.isSuperadmin));
+    // OWNER/SUPERADMIN: все вкладки
+    // ADMIN: без "Аудит" и "DM аудит"
+    const hideForAdmin = new Set(["audit", "dms"]);
+    for (const t of adminTabs) {
+      const tab = t.dataset.adminTab;
+      if (!tab) continue;
+      const shouldHide = (!canOwnerView && hideForAdmin.has(tab));
+      t.classList.toggle("hidden", shouldHide);
+      // also hide corresponding view if needed
+      if (adminViews[tab]) adminViews[tab].classList.toggle("hidden", shouldHide || !t.classList.contains("active"));
+    }
+
+    // если текущая активная вкладка недоступна — переключим на roles
+    const activeTabEl = adminTabs.find(t => t.classList.contains("active"));
+    const activeTab = activeTabEl ? activeTabEl.dataset.adminTab : null;
+    if (activeTab && !canOwnerView && hideForAdmin.has(activeTab)) {
+      setAdminTab("roles");
+    }
+  }
+
 
   logoutBtn.onclick = async () => {
     try { await api("/api/logout", { method: "POST" }); } catch {}
@@ -491,7 +611,8 @@
           displayName: regName.value,
           email: regEmail.value,
           password: regPass.value,
-          positionRoleId: Number(regPosition.value)
+          positionRoleId: Number(regPosition.value),
+          inviteToken: (document.getElementById('regInvite')?.value || '').trim()
         })
       });
       me = data.me;
@@ -529,7 +650,11 @@
     }
 
     // чтобы не путать: readCount включает и тебя, это нормально (реально прочитал = ты тоже)
-    el.textContent = `✓ ${r.readCount}/${r.total}`;
+    if (r.readCount >= r.total) {
+      el.textContent = "✓✓";
+    } else {
+      el.textContent = `✓ ${r.readCount}/${r.total}`;
+    }
   }
 
   function addMsg(m) {
@@ -610,6 +735,8 @@
 
     titleEl.textContent = "#" + name;
     hintEl.textContent = "";
+    updateHeaderStatus();
+    updateHeaderStatus();
     log.innerHTML = "";
     receiptByMessageId = new Map();
     messageFromId = new Map();
@@ -630,6 +757,7 @@
 
     titleEl.textContent = `DM: ${otherUser ? otherUser.displayName : ("#" + chatId)}`;
     hintEl.textContent = "";
+    updateHeaderStatus();
     log.innerHTML = "";
     receiptByMessageId = new Map();
     messageFromId = new Map();
@@ -690,7 +818,7 @@
         onlineUserIds = new Set((msg.onlineUserIds || []).map(Number));
         renderChannels();
 
-        if (channels.length) joinChannel(channels[0].id, channels[0].name);
+        if (channels.length) { joinChannel(channels[0].id, channels[0].name); updateHeaderStatus(); }
         else {
           titleEl.textContent = "Нет доступных каналов";
           hintEl.textContent = "Попроси администратора выдать доступ";
@@ -707,6 +835,7 @@
 
         // перерисуем списки чтобы точки online обновились
         renderDmListUI();
+        updateHeaderStatus();
         // в логах точка обновится только для новых сообщений — пока ок
         return;
       }
@@ -769,6 +898,7 @@
         if (msg.otherUser) {
           activeDmOther = msg.otherUser;
           titleEl.textContent = `DM: ${activeDmOther.displayName}`;
+          updateHeaderStatus();
         }
 
         const messages = msg.messages || [];
@@ -849,6 +979,7 @@
 
   openAdminBtn.onclick = async () => {
     adminCard.classList.remove("hidden");
+    applyAdminTabPermissions();
     await refreshAdmin();
   };
   closeAdminBtn.onclick = () => adminCard.classList.add("hidden");
@@ -972,6 +1103,54 @@
       dmAuditLog.textContent = "DM аудит доступен только OWNER/SUPERADMIN";
       dmAuditMessages.innerHTML = "";
     }
+
+    // invites
+    try {
+      const invs = await api("/api/admin/invites");
+      const list = invs.invites || [];
+      invitesList.innerHTML = list.map(it => {
+        const link = `${location.origin}/?invite=${it.token}`;
+        const exp = it.expiresAt ? new Date(it.expiresAt).toLocaleString() : "—";
+        const used = `${it.usedCount}/${it.maxUses}`;
+        const revoked = it.isRevoked ? " <span class=\"pill danger\">отозван</span>" : "";
+        return `
+          <div class="card" style="margin-top:10px;">
+            <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
+              <div class="truncate"><b>Инвайт</b>${revoked} <span class="muted">использовано: ${used} • истекает: ${esc(exp)}</span></div>
+              <div style="display:flex; gap:6px;">
+                <button data-invite-copy="${it.token}">Копировать ссылку</button>
+                <button class="danger" data-invite-revoke="${it.id}" ${it.isRevoked ? "disabled" : ""}>Отозвать</button>
+              </div>
+            </div>
+            <div class="small"><code>${esc(link)}</code></div>
+          </div>
+        `;
+      }).join("") || `<div class="muted">Пока нет инвайтов. Создай первый.</div>`;
+
+      // bind buttons
+      [...document.querySelectorAll("[data-invite-copy]")].forEach(btn => {
+        btn.onclick = async () => {
+          const t = btn.dataset.inviteCopy;
+          const link = `${location.origin}/?invite=${t}`;
+          try { await navigator.clipboard.writeText(link); inviteMsg.textContent = "✅ Ссылка скопирована"; }
+          catch { inviteMsg.textContent = "Скопируй вручную: " + link; }
+        };
+      });
+
+      [...document.querySelectorAll("[data-invite-revoke]")].forEach(btn => {
+        btn.onclick = async () => {
+          const id = Number(btn.dataset.inviteRevoke || 0);
+          if (!id) return;
+          await api(`/api/admin/invites/${id}`, { method: "DELETE" });
+          inviteMsg.textContent = "✅ Инвайт отозван";
+          await refreshAdmin();
+        };
+      });
+    } catch {
+      invitesList.innerHTML = `<div class="muted">Инвайты доступны только ADMIN/OWNER</div>`;
+    }
+
+    applyAdminTabPermissions();
   }
 
   createRoleBtn.onclick = async () => {
@@ -1024,6 +1203,32 @@
     }
   };
 
+
+  inviteCreateBtn.onclick = async () => {
+    const maxUses = Number(inviteMaxUses.value || 1);
+    const expiresInHours = Number(inviteExpiresHours.value || 0);
+    await createInviteAndCopy(maxUses, expiresInHours);
+    inviteMaxUses.value = "";
+    inviteExpiresHours.value = "";
+  };
+
+  inviteQuick1.onclick = async () => {
+    inviteMaxUses.value = "1";
+    inviteExpiresHours.value = "0";
+    await createInviteAndCopy(1, 0);
+  };
+  inviteQuick24.onclick = async () => {
+    inviteMaxUses.value = "1";
+    inviteExpiresHours.value = "24";
+    await createInviteAndCopy(1, 24);
+  };
+  inviteQuick10.onclick = async () => {
+    inviteMaxUses.value = "10";
+    inviteExpiresHours.value = "0";
+    await createInviteAndCopy(10, 0);
+  };
+
+
   dmAuditLoadBtn.onclick = async () => {
     const chatId = Number(dmAuditSelect.value || 0);
     if (!chatId) return;
@@ -1052,7 +1257,24 @@
   ======================= */
   (async () => {
     try {
+      // invite from URL: ?invite=TOKEN
+      const params = new URLSearchParams(location.search);
+      const inv = params.get("invite");
+      hasInviteParam = Boolean(inv);
+
+      // если инвайта нет — скрываем вкладку регистрации (чтобы никто не пытался регаться)
+      tabRegister.classList.toggle("hidden", !hasInviteParam);
+
+      const regInvEl = document.getElementById("regInvite");
+      if (hasInviteParam && regInvEl) {
+        regInvEl.value = inv;
+        setAuthMode("register");
+      } else {
+        setAuthMode("login");
+      }
+
       await loadPositions();
+
       const meResp = await api("/api/me");
       me = meResp.me;
       statusEl.textContent = "Сессия активна";
