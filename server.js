@@ -57,6 +57,30 @@ async function queryOne(sql, params) {
 }
 
 /* =========================
+   Online presence
+========================= */
+const onlineCounts = new Map(); // userId -> count
+
+function setOnline(userId, delta) {
+  const cur = onlineCounts.get(userId) || 0;
+  const next = Math.max(0, cur + delta);
+  if (next === 0) onlineCounts.delete(userId);
+  else onlineCounts.set(userId, next);
+  return { was: cur > 0, now: next > 0 };
+}
+
+function broadcastAll(obj) {
+  const payload = JSON.stringify(obj);
+  for (const c of wss.clients) {
+    if (c.readyState === 1) c.send(payload);
+  }
+}
+
+function getOnlineUserIds() {
+  return [...onlineCounts.keys()];
+}
+
+/* =========================
    Auth & Sessions
 ========================= */
 async function getUserBySessionToken(sessionToken) {
@@ -186,6 +210,113 @@ async function auditLog(actorUserId, action, metaObj) {
 }
 
 /* =========================
+   Reads: eligible + progress
+========================= */
+async function getSuperadminUserIdOrNull() {
+  if (!SUPERADMIN_EMAIL) return null;
+  const row = await queryOne(`SELECT id FROM users WHERE lower(email)=$1`, [SUPERADMIN_EMAIL]);
+  return row ? Number(row.id) : null;
+}
+
+async function getEligibleUserIdsForChannel(channelId) {
+  const ch = await queryOne(`SELECT id, is_public FROM channels WHERE id=$1`, [channelId]);
+  if (!ch) return [];
+
+  const superId = await getSuperadminUserIdOrNull();
+
+  if (ch.is_public) {
+    // all users + owner(s) + superadmin (already in users but keep union safe)
+    const { rows } = await pool.query(`SELECT id FROM users ORDER BY id ASC`);
+    const ids = new Set(rows.map(r => Number(r.id)));
+    const ownerRows = await pool.query(`SELECT id FROM users WHERE system_role='OWNER'`);
+    for (const r of ownerRows.rows) ids.add(Number(r.id));
+    if (superId) ids.add(superId);
+    return [...ids];
+  }
+
+  // private: explicit users + role-based users + owner + superadmin
+  const { rows } = await pool.query(
+    `
+    WITH role_users AS (
+      SELECT DISTINCT ur.user_id AS id
+      FROM channel_role_access cra
+      JOIN user_roles ur ON ur.role_id = cra.role_id
+      WHERE cra.channel_id = $1
+    ),
+    direct_users AS (
+      SELECT DISTINCT user_id AS id
+      FROM channel_user_access
+      WHERE channel_id = $1
+    ),
+    owners AS (
+      SELECT id FROM users WHERE system_role='OWNER'
+    ),
+    super AS (
+      SELECT id FROM users WHERE $2::int IS NOT NULL AND id = $2::int
+    )
+    SELECT DISTINCT id FROM (
+      SELECT id FROM role_users
+      UNION ALL SELECT id FROM direct_users
+      UNION ALL SELECT id FROM owners
+      UNION ALL SELECT id FROM super
+    ) t
+    `,
+    [channelId, superId]
+  );
+
+  return rows.map(r => Number(r.id));
+}
+
+function computeReadCountsForMessages(messages, eligibleIds, lastReadByUser) {
+  // messages sorted ASC by id
+  const total = eligibleIds.length;
+  for (const m of messages) {
+    let readCount = 0;
+    for (const uid of eligibleIds) {
+      const last = lastReadByUser.get(uid) || 0;
+      if (last >= m.id) readCount += 1;
+    }
+    m.read = { readCount, total };
+  }
+  return messages;
+}
+
+async function getReadProgressForMessage(channelId, messageId) {
+  const eligibleIds = await getEligibleUserIdsForChannel(channelId);
+  if (!eligibleIds.length) return { readCount: 0, total: 0 };
+
+  const { rows } = await pool.query(
+    `
+    WITH eligible AS (
+      SELECT unnest($2::int[]) AS user_id
+    )
+    SELECT
+      COUNT(*) FILTER (WHERE cr.last_read_message_id >= $3)::int AS read_count,
+      COUNT(*)::int AS total
+    FROM eligible e
+    LEFT JOIN channel_reads cr
+      ON cr.channel_id = $1 AND cr.user_id = e.user_id
+    `,
+    [channelId, eligibleIds, messageId]
+  );
+
+  return { readCount: Number(rows[0]?.read_count || 0), total: Number(rows[0]?.total || 0) };
+}
+
+async function upsertChannelRead(channelId, userId, lastReadMessageId) {
+  await pool.query(
+    `
+    INSERT INTO channel_reads (channel_id, user_id, last_read_message_id, updated_at)
+    VALUES ($1,$2,$3,NOW())
+    ON CONFLICT (channel_id, user_id)
+    DO UPDATE SET last_read_message_id = GREATEST(channel_reads.last_read_message_id, EXCLUDED.last_read_message_id),
+                  updated_at = NOW()
+    `,
+    [channelId, userId, lastReadMessageId]
+  );
+}
+
+/* =========================
    DB migrate + seed
 ========================= */
 async function migrate() {
@@ -201,7 +332,7 @@ async function migrate() {
 
     CREATE TABLE IF NOT EXISTS roles (
       id SERIAL PRIMARY KEY,
-      name TEXT UNIQUE NOT NULL,
+      name TEXT UNIQUE NOT NULL,          -- slug
       display_name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -239,6 +370,14 @@ async function migrate() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS channel_reads (
+      channel_id INT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      last_read_message_id BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (channel_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -259,7 +398,6 @@ async function migrate() {
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true;`);
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
-  // seed base channel
   await pool.query(
     `INSERT INTO channels (name, is_public)
      VALUES ($1, $2)
@@ -267,7 +405,6 @@ async function migrate() {
     ["general", true]
   );
 
-  // seed default positions
   const seeds = [
     { name: "worker", display: "Рабочий" },
     { name: "manager", display: "Менеджер" },
@@ -475,7 +612,6 @@ app.get("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (_req, res) 
   });
 });
 
-// user roles list
 app.get("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   if (!userId) return fail(res, 400, "BAD_INPUT", "bad user id");
@@ -512,7 +648,6 @@ app.post("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (req, res) 
   ok(res, { role: { id: Number(row.id), name: row.name, displayName: row.display_name } });
 });
 
-// add role to user
 app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   const roleId = Number(req.body.roleId || 0);
@@ -532,7 +667,6 @@ app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (
   ok(res, {});
 });
 
-// remove role from user
 app.delete("/api/admin/users/:id/roles/:roleId", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   const roleId = Number(req.params.roleId);
@@ -543,7 +677,6 @@ app.delete("/api/admin/users/:id/roles/:roleId", requireAuth, requireOwnerOrAdmi
   ok(res, {});
 });
 
-// list all channels for admin
 app.get("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
@@ -551,7 +684,6 @@ app.get("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (_req, re
   ok(res, { channels: rows.map(c => ({ id: Number(c.id), name: c.name, isPublic: c.is_public })) });
 });
 
-// create channel
 app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const name = normalizeChannelName(req.body.name);
   const isPublic = Boolean(req.body.isPublic);
@@ -569,7 +701,6 @@ app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, re
   ok(res, { channel: { id: Number(ch.id), name: ch.name, isPublic: ch.is_public } });
 });
 
-// get channel access
 app.get("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const channelId = Number(req.params.id);
   const ch = await queryOne(`SELECT id FROM channels WHERE id=$1`, [channelId]);
@@ -584,7 +715,6 @@ app.get("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asyn
   });
 });
 
-// set channel access
 app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const channelId = Number(req.params.id);
   const roleIds = Array.isArray(req.body.roleIds) ? req.body.roleIds.map(Number).filter(Boolean) : [];
@@ -613,22 +743,6 @@ app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asy
   ok(res, {});
 });
 
-// transfer ownership
-app.post("/api/owner/transfer", requireAuth, requireOwner, async (req, res) => {
-  const newOwnerId = Number(req.body.userId || 0);
-  if (!newOwnerId) return fail(res, 400, "BAD_INPUT", "userId required");
-
-  const target = await queryOne(`SELECT id FROM users WHERE id=$1`, [newOwnerId]);
-  if (!target) return fail(res, 404, "NOT_FOUND", "User not found");
-
-  await pool.query(`UPDATE users SET system_role='ADMIN' WHERE id=$1`, [req.user.id]);
-  await pool.query(`UPDATE users SET system_role='OWNER' WHERE id=$1`, [newOwnerId]);
-
-  await auditLog(req.user.id, "OWNER_TRANSFER", { toUserId: newOwnerId, at: nowIso() });
-  ok(res, {});
-});
-
-// audit logs
 app.get("/api/audit", requireAuth, requireOwner, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT a.id, a.action, a.meta, a.created_at, u.email, u.display_name
@@ -650,7 +764,7 @@ app.get("/api/audit", requireAuth, requireOwner, async (_req, res) => {
 });
 
 /* =========================
-   WebSocket (auth + channels)
+   WebSocket (auth + channels + read receipts + presence)
 ========================= */
 async function wsGetUserFromReq(req) {
   const raw = req.headers.cookie || "";
@@ -658,17 +772,28 @@ async function wsGetUserFromReq(req) {
   const token = parsed.session || "";
   return await getUserBySessionToken(token);
 }
+
 function wsSend(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
+
 async function wsSendInit(ws) {
   const channels = await listAccessibleChannels(ws.user);
-  wsSend(ws, { type: "init", me: ws.user, channels });
+  wsSend(ws, {
+    type: "init",
+    me: ws.user,
+    channels,
+    onlineUserIds: getOnlineUserIds(),
+  });
 }
-async function loadChannelHistory(channelId, limit = 200) {
+
+async function loadChannelHistoryWithReads(channelId, limit = 200) {
   const { rows } = await pool.query(
-    `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
-            u.display_name
+    `SELECT m.id,
+            m.text,
+            EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
+            u.display_name,
+            u.id AS sender_id
      FROM channel_messages m
      JOIN users u ON u.id = m.sender_user_id
      WHERE m.channel_id=$1
@@ -676,13 +801,38 @@ async function loadChannelHistory(channelId, limit = 200) {
      LIMIT $2`,
     [channelId, limit]
   );
-  return rows.reverse().map((r) => ({
+
+  const messages = rows.reverse().map(r => ({
     id: Number(r.id),
     text: r.text,
     at: Number(r.at),
     from: r.display_name,
+    fromId: Number(r.sender_id),
+    read: { readCount: 0, total: 0 },
   }));
+
+  const eligibleIds = await getEligibleUserIdsForChannel(channelId);
+  const total = eligibleIds.length;
+
+  if (messages.length === 0) {
+    return { messages, totalEligible: total };
+  }
+
+  // last read by user for this channel
+  const { rows: readRows } = await pool.query(
+    `SELECT user_id, last_read_message_id
+     FROM channel_reads
+     WHERE channel_id=$1 AND user_id = ANY($2::int[])`,
+    [channelId, eligibleIds.length ? eligibleIds : [0]]
+  );
+
+  const lastReadByUser = new Map();
+  for (const rr of readRows) lastReadByUser.set(Number(rr.user_id), Number(rr.last_read_message_id));
+
+  computeReadCountsForMessages(messages, eligibleIds, lastReadByUser);
+  return { messages, totalEligible: total };
 }
+
 async function saveChannelMessage(channelId, senderUserId, text) {
   const row = await queryOne(
     `INSERT INTO channel_messages (channel_id, sender_user_id, text)
@@ -692,6 +842,7 @@ async function saveChannelMessage(channelId, senderUserId, text) {
   );
   return { id: Number(row.id), at: Number(row.at) };
 }
+
 function broadcastToChannelId(channelId, obj) {
   const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
@@ -710,6 +861,19 @@ wss.on("connection", async (ws, req) => {
   ws.channelId = null;
   ws.isAlive = true;
 
+  // online
+  const { was, now } = setOnline(user.id, +1);
+  if (!was && now) {
+    broadcastAll({ type: "presence_update", userId: user.id, online: true });
+  }
+
+  ws.on("close", () => {
+    const { was: w, now: n } = setOnline(user.id, -1);
+    if (w && !n) {
+      broadcastAll({ type: "presence_update", userId: user.id, online: false });
+    }
+  });
+
   ws.on("pong", () => (ws.isAlive = true));
 
   await wsSendInit(ws);
@@ -725,9 +889,13 @@ wss.on("connection", async (ws, req) => {
         wsSend(ws, { type: "error", code: "NO_ACCESS", message: "No access to channel" });
         return;
       }
+
       ws.channelId = channelId;
-      wsSend(ws, { type: "joined", channelId });
-      wsSend(ws, { type: "history", channelId, messages: await loadChannelHistory(channelId) });
+
+      const history = await loadChannelHistoryWithReads(channelId, 200);
+      wsSend(ws, { type: "joined", channelId, totalEligible: history.totalEligible });
+      wsSend(ws, { type: "history", channelId, messages: history.messages, totalEligible: history.totalEligible });
+
       return;
     }
 
@@ -743,14 +911,46 @@ wss.on("connection", async (ws, req) => {
       }
 
       const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000));
+
+      // mark sender as read at least for own message
+      await upsertChannelRead(ws.channelId, ws.user.id, saved.id);
+
+      const prog = await getReadProgressForMessage(ws.channelId, saved.id);
+
       const message = {
         id: saved.id,
         at: saved.at,
         from: ws.user.displayName,
+        fromId: ws.user.id,
         text: text.slice(0, 2000),
+        read: { readCount: prog.readCount, total: prog.total },
       };
 
       broadcastToChannelId(ws.channelId, { type: "chat", channelId: ws.channelId, message });
+      return;
+    }
+
+    // NEW: read receipt update
+    if (msg.type === "read" && typeof msg.channelId === "number" && typeof msg.lastReadMessageId === "number") {
+      const channelId = Math.floor(msg.channelId);
+      const lastReadMessageId = Math.floor(msg.lastReadMessageId);
+
+      const allowed = await canAccessChannel(ws.user, channelId);
+      if (!allowed) return;
+
+      await upsertChannelRead(channelId, ws.user.id, lastReadMessageId);
+
+      const prog = await getReadProgressForMessage(channelId, lastReadMessageId);
+
+      // broadcast progress for that messageId
+      broadcastToChannelId(channelId, {
+        type: "read_progress",
+        channelId,
+        messageId: lastReadMessageId,
+        read: { readCount: prog.readCount, total: prog.total },
+      });
+
+      return;
     }
   });
 });
@@ -769,12 +969,12 @@ setInterval(() => {
 ========================= */
 const PORT = process.env.PORT || 3000;
 
-// 1) открываем порт СРАЗУ (чтобы Render увидел)
+// 1) открываем порт сразу (Render увидит)
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Listening on :${PORT}`);
 });
 
-// 2) миграции запускаем после старта (и не роняем процесс)
+// 2) миграции после старта
 (async () => {
   try {
     await migrate();
