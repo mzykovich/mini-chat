@@ -2,11 +2,16 @@ import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
 import pg from "pg";
+import bcrypt from "bcryptjs";
+import cookie from "cookie";
+import crypto from "crypto";
 
 const { Pool } = pg;
 
 const app = express();
+app.use(express.json());
 app.use(express.static("public"));
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
@@ -17,497 +22,707 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
+const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || "").trim().toLowerCase();
+
+/* =========================
+   Helpers
+========================= */
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function randToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function normalizeName(name) {
+  return String(name || "").trim().slice(0, 48) || "User";
+}
+
+function normalizeChannelName(name) {
+  const safe = String(name || "").toLowerCase().trim().slice(0, 40);
+  return safe.replace(/\s+/g, "-").replace(/[^a-z0-9\-_]/g, "") || "general";
+}
+
+function ok(res, data) {
+  res.json({ ok: true, ...data });
+}
+
+function fail(res, status, code, message) {
+  res.status(status).json({ ok: false, code, message });
+}
+
+async function queryOne(sql, params) {
+  const { rows } = await pool.query(sql, params);
+  return rows[0] || null;
+}
+
+/* =========================
+   Auth & Sessions
+========================= */
+async function getUserBySessionToken(sessionToken) {
+  if (!sessionToken) return null;
+  const row = await queryOne(
+    `SELECT u.id, u.email, u.display_name, u.system_role, u.created_at
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token = $1 AND s.expires_at > NOW()`,
+    [sessionToken]
+  );
+  if (!row) return null;
+
+  const email = String(row.email).toLowerCase();
+  const isSuper = SUPERADMIN_EMAIL && email === SUPERADMIN_EMAIL;
+
+  return {
+    id: Number(row.id),
+    email,
+    displayName: row.display_name,
+    systemRole: row.system_role, // MEMBER/ADMIN/OWNER
+    isSuperadmin: Boolean(isSuper),
+    createdAt: row.created_at,
+  };
+}
+
+function getSessionTokenFromReq(req) {
+  const raw = req.headers.cookie || "";
+  const parsed = cookie.parse(raw || "");
+  return parsed.session || "";
+}
+
+async function requireAuth(req, res, next) {
+  const token = getSessionTokenFromReq(req);
+  const user = await getUserBySessionToken(token);
+  if (!user) return fail(res, 401, "UNAUTH", "Not authenticated");
+  req.user = user;
+  req.sessionToken = token;
+  next();
+}
+
+function requireOwnerOrAdmin(req, res, next) {
+  const u = req.user;
+  if (u.isSuperadmin) return next();
+  if (u.systemRole === "OWNER" || u.systemRole === "ADMIN") return next();
+  return fail(res, 403, "FORBIDDEN", "Not enough permissions");
+}
+
+function requireOwner(req, res, next) {
+  const u = req.user;
+  if (u.isSuperadmin) return next();
+  if (u.systemRole === "OWNER") return next();
+  return fail(res, 403, "FORBIDDEN", "Owner only");
+}
+
+/* =========================
+   Roles & Access
+========================= */
+async function getUserCustomRoleIds(userId) {
+  const { rows } = await pool.query(
+    `SELECT role_id FROM user_roles WHERE user_id = $1`,
+    [userId]
+  );
+  return rows.map(r => Number(r.role_id));
+}
+
+async function canAccessChannel(user, channelId) {
+  // OWNER & SUPERADMIN: always
+  if (user.isSuperadmin || user.systemRole === "OWNER") return true;
+
+  // public channel?
+  const ch = await queryOne(`SELECT id, is_public FROM channels WHERE id=$1`, [channelId]);
+  if (!ch) return false;
+  if (ch.is_public) return true;
+
+  // explicit user access?
+  const uacc = await queryOne(
+    `SELECT 1 FROM channel_user_access WHERE channel_id=$1 AND user_id=$2`,
+    [channelId, user.id]
+  );
+  if (uacc) return true;
+
+  // role access?
+  const roleIds = await getUserCustomRoleIds(user.id);
+  if (!roleIds.length) return false;
+
+  const racc = await queryOne(
+    `SELECT 1 FROM channel_role_access WHERE channel_id=$1 AND role_id = ANY($2::int[])`,
+    [channelId, roleIds]
+  );
+  return Boolean(racc);
+}
+
+async function listAccessibleChannels(user) {
+  if (user.isSuperadmin || user.systemRole === "OWNER") {
+    const { rows } = await pool.query(
+      `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
+    );
+    return rows.map(r => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
+  }
+
+  const roleIds = await getUserCustomRoleIds(user.id);
+
+  const { rows } = await pool.query(
+    `
+    SELECT DISTINCT c.id, c.name, c.is_public
+    FROM channels c
+    LEFT JOIN channel_user_access cua
+      ON cua.channel_id = c.id AND cua.user_id = $1
+    LEFT JOIN channel_role_access cra
+      ON cra.channel_id = c.id AND (cra.role_id = ANY($2::int[]) OR $2::int[] IS NULL)
+    WHERE c.is_public = true
+       OR cua.user_id IS NOT NULL
+       OR cra.role_id IS NOT NULL
+    ORDER BY c.name ASC
+    LIMIT 200
+    `,
+    [user.id, roleIds.length ? roleIds : null]
+  );
+
+  return rows.map(r => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
+}
+
+async function auditLog(actorUserId, action, metaObj) {
+  await pool.query(
+    `INSERT INTO audit_logs (actor_user_id, action, meta)
+     VALUES ($1, $2, $3::jsonb)`,
+    [actorUserId, action, JSON.stringify(metaObj || {})]
+  );
+}
+
+/* =========================
+   DB migrate + seed
+========================= */
 async function migrate() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      system_role TEXT NOT NULL DEFAULT 'MEMBER', -- MEMBER|ADMIN|OWNER
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS roles (
+      id SERIAL PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,          -- slug
+      display_name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS user_roles (
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role_id INT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (user_id, role_id)
+    );
+
     CREATE TABLE IF NOT EXISTS channels (
       id SERIAL PRIMARY KEY,
       name TEXT UNIQUE NOT NULL,
+      is_public BOOLEAN NOT NULL DEFAULT true,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS messages (
+    CREATE TABLE IF NOT EXISTS channel_role_access (
+      channel_id INT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      role_id INT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (channel_id, role_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS channel_user_access (
+      channel_id INT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (channel_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS channel_messages (
       id BIGSERIAL PRIMARY KEY,
       channel_id INT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-      sender TEXT NOT NULL,
+      sender_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       text TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS channel_reads (
-      channel_id INT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-      user_name TEXT NOT NULL,
-      last_read_message_id BIGINT NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (channel_id, user_name)
-    );
-
-    -- DM
-    CREATE TABLE IF NOT EXISTS direct_chats (
-      id SERIAL PRIMARY KEY,
-      user_a TEXT NOT NULL,
-      user_b TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (user_a, user_b)
+      expires_at TIMESTAMPTZ NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS direct_messages (
+    CREATE TABLE IF NOT EXISTS audit_logs (
       id BIGSERIAL PRIMARY KEY,
-      chat_id INT NOT NULL REFERENCES direct_chats(id) ON DELETE CASCADE,
-      sender TEXT NOT NULL,
-      text TEXT NOT NULL,
+      actor_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      meta JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS direct_reads (
-      chat_id INT NOT NULL REFERENCES direct_chats(id) ON DELETE CASCADE,
-      user_name TEXT NOT NULL,
-      last_read_message_id BIGINT NOT NULL DEFAULT 0,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (chat_id, user_name)
     );
   `);
 
+  // seed base channels
   await pool.query(
-    `INSERT INTO channels (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`,
-    ["general"]
+    `INSERT INTO channels (name, is_public) VALUES ($1, $2)
+     ON CONFLICT (name) DO NOTHING`,
+    ["general", true]
   );
-}
 
-function send(ws, obj) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
-}
-
-function broadcastAll(obj) {
-  const payload = JSON.stringify(obj);
-  for (const c of wss.clients) if (c.readyState === 1) c.send(payload);
-}
-
-function broadcastToChannel(channelName, obj) {
-  const payload = JSON.stringify(obj);
-  for (const c of wss.clients) {
-    if (c.readyState === 1 && c.channel?.name === channelName) c.send(payload);
+  // seed default positions (должности/кастомные роли)
+  const seeds = [
+    { name: "worker", display: "Рабочий" },
+    { name: "manager", display: "Менеджер" },
+    { name: "director", display: "Директор" },
+  ];
+  for (const r of seeds) {
+    await pool.query(
+      `INSERT INTO roles (name, display_name)
+       VALUES ($1, $2)
+       ON CONFLICT (name) DO NOTHING`,
+      [r.name, r.display]
+    );
   }
 }
 
-// ===== Channels =====
-function normalizeChannelName(name) {
-  const safe = (name || "general").toLowerCase().trim().slice(0, 40);
-  return safe.replace(/\s+/g, "-") || "general";
-}
+/* =========================
+   REST API
+========================= */
 
-async function getOrCreateChannel(name) {
-  const safe = normalizeChannelName(name);
+// Public: list positions (for registration dropdown)
+app.get("/api/positions", async (_req, res) => {
   const { rows } = await pool.query(
-    `INSERT INTO channels (name) VALUES ($1)
-     ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-     RETURNING id, name`,
-    [safe]
+    `SELECT id, name, display_name FROM roles ORDER BY id ASC LIMIT 200`
   );
-  return rows[0];
-}
+  ok(res, {
+    positions: rows.map(r => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+  });
+});
 
-async function listChannels() {
-  const { rows } = await pool.query(`SELECT id, name FROM channels ORDER BY name ASC LIMIT 200`);
-  return rows;
-}
+// Register
+app.post("/api/register", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password || "");
+  const displayName = normalizeName(req.body.displayName);
+  const positionRoleId = Number(req.body.positionRoleId || 0);
 
-async function loadHistory(channelId, limit = 200) {
+  if (!isValidEmail(email)) return fail(res, 400, "BAD_EMAIL", "Invalid email");
+  if (password.length < 6) return fail(res, 400, "BAD_PASSWORD", "Password must be at least 6 chars");
+  if (!positionRoleId) return fail(res, 400, "BAD_POSITION", "Choose a position");
+
+  const existing = await queryOne(`SELECT 1 FROM users WHERE email=$1`, [email]);
+  if (existing) return fail(res, 409, "EMAIL_TAKEN", "Email already registered");
+
+  const hash = await bcrypt.hash(password, 10);
+
+  // first user becomes OWNER
+  const countRow = await queryOne(`SELECT COUNT(*)::int AS c FROM users`, []);
+  const isFirst = Number(countRow?.c || 0) === 0;
+  const systemRole = isFirst ? "OWNER" : "MEMBER";
+
+  const user = await queryOne(
+    `INSERT INTO users (email, password_hash, display_name, system_role)
+     VALUES ($1,$2,$3,$4)
+     RETURNING id, email, display_name, system_role`,
+    [email, hash, displayName, systemRole]
+  );
+
+  // assign position role
+  await pool.query(
+    `INSERT INTO user_roles (user_id, role_id)
+     VALUES ($1,$2)
+     ON CONFLICT DO NOTHING`,
+    [user.id, positionRoleId]
+  );
+
+  // create session
+  const token = randToken();
+  await pool.query(
+    `INSERT INTO sessions (token, user_id, expires_at)
+     VALUES ($1,$2, NOW() + INTERVAL '30 days')`,
+    [token, user.id]
+  );
+
+  res.setHeader(
+    "Set-Cookie",
+    cookie.serialize("session", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 30,
+    })
+  );
+
+  await auditLog(user.id, "REGISTER", { email, systemRole, at: nowIso() });
+
+  ok(res, {
+    me: {
+      id: Number(user.id),
+      email: user.email,
+      displayName: user.display_name,
+      systemRole: user.system_role,
+    },
+  });
+});
+
+// Login
+app.post("/api/login", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password || "");
+
+  if (!isValidEmail(email)) return fail(res, 400, "BAD_EMAIL", "Invalid email");
+  if (!password) return fail(res, 400, "BAD_PASSWORD", "Password required");
+
+  const row = await queryOne(
+    `SELECT id, email, password_hash, display_name, system_role
+     FROM users WHERE email=$1`,
+    [email]
+  );
+  if (!row) return fail(res, 401, "INVALID_LOGIN", "Wrong email or password");
+
+  const okPass = await bcrypt.compare(password, row.password_hash);
+  if (!okPass) return fail(res, 401, "INVALID_LOGIN", "Wrong email or password");
+
+  const token = randToken();
+  await pool.query(
+    `INSERT INTO sessions (token, user_id, expires_at)
+     VALUES ($1,$2, NOW() + INTERVAL '30 days')`,
+    [token, row.id]
+  );
+
+  res.setHeader(
+    "Set-Cookie",
+    cookie.serialize("session", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 30,
+    })
+  );
+
+  await auditLog(Number(row.id), "LOGIN", { at: nowIso() });
+
+  ok(res, {
+    me: {
+      id: Number(row.id),
+      email: row.email,
+      displayName: row.display_name,
+      systemRole: row.system_role,
+    },
+  });
+});
+
+// Logout
+app.post("/api/logout", requireAuth, async (req, res) => {
+  await pool.query(`DELETE FROM sessions WHERE token=$1`, [req.sessionToken]);
+  res.setHeader(
+    "Set-Cookie",
+    cookie.serialize("session", "", {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 0,
+    })
+  );
+  await auditLog(req.user.id, "LOGOUT", { at: nowIso() });
+  ok(res, {});
+});
+
+// Me
+app.get("/api/me", requireAuth, async (req, res) => {
+  const roleIds = await getUserCustomRoleIds(req.user.id);
   const { rows } = await pool.query(
-    `SELECT id, sender, text, EXTRACT(EPOCH FROM created_at)*1000 AS at
-     FROM messages WHERE channel_id=$1
-     ORDER BY id DESC LIMIT $2`,
+    `SELECT id, name, display_name FROM roles WHERE id = ANY($1::int[])`,
+    [roleIds.length ? roleIds : [0]]
+  );
+
+  ok(res, {
+    me: req.user,
+    customRoles: rows.map(r => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+  });
+});
+
+// Channels accessible
+app.get("/api/channels", requireAuth, async (req, res) => {
+  const channels = await listAccessibleChannels(req.user);
+  ok(res, { channels });
+});
+
+// Admin: list users
+app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, email, display_name, system_role, created_at
+     FROM users
+     ORDER BY id ASC
+     LIMIT 500`
+  );
+  ok(res, {
+    users: rows.map(u => ({
+      id: Number(u.id),
+      email: u.email,
+      displayName: u.display_name,
+      systemRole: u.system_role,
+      createdAt: u.created_at,
+    })),
+  });
+});
+
+// Admin: list roles
+app.get("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, name, display_name FROM roles ORDER BY id ASC LIMIT 200`
+  );
+  ok(res, {
+    roles: rows.map(r => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+  });
+});
+
+// Admin: create role (custom)
+app.post("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const name = String(req.body.name || "").trim().toLowerCase().slice(0, 32).replace(/\s+/g, "-");
+  const displayName = String(req.body.displayName || "").trim().slice(0, 48);
+
+  if (!name || !displayName) return fail(res, 400, "BAD_ROLE", "Role name/displayName required");
+
+  const row = await queryOne(
+    `INSERT INTO roles (name, display_name)
+     VALUES ($1,$2)
+     ON CONFLICT (name) DO NOTHING
+     RETURNING id, name, display_name`,
+    [name, displayName]
+  );
+
+  if (!row) return fail(res, 409, "ROLE_EXISTS", "Role already exists");
+
+  await auditLog(req.user.id, "ROLE_CREATE", { name, displayName, at: nowIso() });
+  ok(res, { role: { id: Number(row.id), name: row.name, displayName: row.display_name } });
+});
+
+// Admin: assign custom role to user
+app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  const roleId = Number(req.body.roleId || 0);
+  if (!userId || !roleId) return fail(res, 400, "BAD_INPUT", "userId/roleId required");
+
+  // don't allow changing OWNER via this endpoint
+  const target = await queryOne(`SELECT id, system_role FROM users WHERE id=$1`, [userId]);
+  if (!target) return fail(res, 404, "NOT_FOUND", "User not found");
+
+  await pool.query(
+    `INSERT INTO user_roles (user_id, role_id)
+     VALUES ($1,$2)
+     ON CONFLICT DO NOTHING`,
+    [userId, roleId]
+  );
+
+  await auditLog(req.user.id, "USER_ROLE_ADD", { userId, roleId, at: nowIso() });
+  ok(res, {});
+});
+
+// Admin: create channel
+app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const name = normalizeChannelName(req.body.name);
+  const isPublic = Boolean(req.body.isPublic);
+
+  const ch = await queryOne(
+    `INSERT INTO channels (name, is_public)
+     VALUES ($1,$2)
+     ON CONFLICT (name) DO NOTHING
+     RETURNING id, name, is_public`,
+    [name, isPublic]
+  );
+  if (!ch) return fail(res, 409, "CHANNEL_EXISTS", "Channel already exists");
+
+  await auditLog(req.user.id, "CHANNEL_CREATE", { name, isPublic, at: nowIso() });
+  ok(res, { channel: { id: Number(ch.id), name: ch.name, isPublic: ch.is_public } });
+});
+
+// Admin: set channel access (roles + users)
+app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const channelId = Number(req.params.id);
+  const roleIds = Array.isArray(req.body.roleIds) ? req.body.roleIds.map(Number).filter(Boolean) : [];
+  const userIds = Array.isArray(req.body.userIds) ? req.body.userIds.map(Number).filter(Boolean) : [];
+
+  const ch = await queryOne(`SELECT id FROM channels WHERE id=$1`, [channelId]);
+  if (!ch) return fail(res, 404, "NOT_FOUND", "Channel not found");
+
+  // clear old
+  await pool.query(`DELETE FROM channel_role_access WHERE channel_id=$1`, [channelId]);
+  await pool.query(`DELETE FROM channel_user_access WHERE channel_id=$1`, [channelId]);
+
+  // add new
+  for (const rid of roleIds) {
+    await pool.query(
+      `INSERT INTO channel_role_access (channel_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      [channelId, rid]
+    );
+  }
+  for (const uid of userIds) {
+    await pool.query(
+      `INSERT INTO channel_user_access (channel_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      [channelId, uid]
+    );
+  }
+
+  await auditLog(req.user.id, "CHANNEL_ACCESS_SET", { channelId, roleIds, userIds, at: nowIso() });
+  ok(res, {});
+});
+
+// Owner-only: transfer ownership (audit + safety)
+app.post("/api/owner/transfer", requireAuth, requireOwner, async (req, res) => {
+  const newOwnerId = Number(req.body.userId || 0);
+  if (!newOwnerId) return fail(res, 400, "BAD_INPUT", "userId required");
+
+  const target = await queryOne(`SELECT id FROM users WHERE id=$1`, [newOwnerId]);
+  if (!target) return fail(res, 404, "NOT_FOUND", "User not found");
+
+  // make current owner admin (optional)
+  await pool.query(`UPDATE users SET system_role='ADMIN' WHERE id=$1`, [req.user.id]);
+  await pool.query(`UPDATE users SET system_role='OWNER' WHERE id=$1`, [newOwnerId]);
+
+  await auditLog(req.user.id, "OWNER_TRANSFER", { toUserId: newOwnerId, at: nowIso() });
+
+  ok(res, {});
+});
+
+// Audit logs (Owner/Superadmin only)
+app.get("/api/audit", requireAuth, requireOwner, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT a.id, a.action, a.meta, a.created_at, u.email, u.display_name
+     FROM audit_logs a
+     JOIN users u ON u.id = a.actor_user_id
+     ORDER BY a.id DESC
+     LIMIT 200`
+  );
+
+  ok(res, {
+    logs: rows.map(r => ({
+      id: Number(r.id),
+      action: r.action,
+      meta: r.meta,
+      at: r.created_at,
+      actor: { email: r.email, displayName: r.display_name },
+    })),
+  });
+});
+
+/* =========================
+   WebSocket (auth + channels)
+========================= */
+async function wsGetUserFromReq(req) {
+  const raw = req.headers.cookie || "";
+  const parsed = cookie.parse(raw || "");
+  const token = parsed.session || "";
+  return await getUserBySessionToken(token);
+}
+
+function wsSend(ws, obj) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+async function wsSendInit(ws) {
+  const channels = await listAccessibleChannels(ws.user);
+  wsSend(ws, { type: "init", me: ws.user, channels });
+}
+
+async function loadChannelHistory(channelId, limit = 200) {
+  const { rows } = await pool.query(
+    `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
+            u.display_name
+     FROM channel_messages m
+     JOIN users u ON u.id = m.sender_user_id
+     WHERE m.channel_id=$1
+     ORDER BY m.id DESC
+     LIMIT $2`,
     [channelId, limit]
   );
   return rows.reverse().map(r => ({
     id: Number(r.id),
-    from: r.sender,
     text: r.text,
     at: Number(r.at),
+    from: r.display_name,
   }));
 }
 
-async function saveMessage(channelId, sender, text) {
-  const { rows } = await pool.query(
-    `INSERT INTO messages (channel_id, sender, text)
+async function saveChannelMessage(channelId, senderUserId, text) {
+  const row = await queryOne(
+    `INSERT INTO channel_messages (channel_id, sender_user_id, text)
      VALUES ($1,$2,$3)
      RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at`,
-    [channelId, sender, text]
+    [channelId, senderUserId, text]
   );
-  return { id: Number(rows[0].id), at: Number(rows[0].at) };
+  return { id: Number(row.id), at: Number(row.at) };
 }
 
-async function setChannelRead(channelId, userName, lastReadId) {
-  await pool.query(
-    `INSERT INTO channel_reads (channel_id, user_name, last_read_message_id)
-     VALUES ($1,$2,$3)
-     ON CONFLICT (channel_id, user_name)
-     DO UPDATE SET last_read_message_id = GREATEST(channel_reads.last_read_message_id, EXCLUDED.last_read_message_id),
-                   updated_at=NOW()`,
-    [channelId, userName, lastReadId]
-  );
-}
-
-// ===== Presence (опционально) =====
-function listUsersInChannel(channelName) {
-  const users = [];
+function broadcastToChannelId(channelId, obj) {
+  const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
-    if (c.readyState === 1 && c.channel?.name === channelName) {
-      users.push(c.user?.name || "Гость");
+    if (c.readyState === 1 && c.channelId === channelId) {
+      c.send(payload);
     }
   }
-  return Array.from(new Set(users.filter(Boolean)));
 }
 
-function broadcastPresence(channelName) {
-  broadcastToChannel(channelName, { type: "presence", users: listUsersInChannel(channelName) });
-}
-
-// ===== Seen state (прочитано всеми онлайн) =====
-async function getChannelReadMin(channel) {
-  const onlineUsers = listUsersInChannel(channel.name);
-  if (!onlineUsers.length) return { connected: 0, readUpTo: 0 };
-
-  const { rows } = await pool.query(
-    `SELECT MIN(last_read_message_id) AS min_read
-     FROM channel_reads
-     WHERE channel_id=$1 AND user_name = ANY($2::text[])`,
-    [channel.id, onlineUsers]
-  );
-
-  return { connected: onlineUsers.length, readUpTo: Number(rows[0]?.min_read || 0) };
-}
-
-async function broadcastSeen(channel) {
-  const { rows } = await pool.query(
-    `SELECT COALESCE(MAX(id),0) AS last_id FROM messages WHERE channel_id=$1`,
-    [channel.id]
-  );
-  const lastSeq = Number(rows[0].last_id || 0);
-  const { connected, readUpTo } = await getChannelReadMin(channel);
-
-  broadcastToChannel(channel.name, {
-    type: "seen_state",
-    channel: channel.name,
-    lastSeq,
-    readUpTo,
-    connected
-  });
-}
-
-// ===== Unread badges for channels (per user) =====
-async function getChannelsStateForUser(userName) {
-  const { rows } = await pool.query(
-    `
-    SELECT
-      c.name,
-      COALESCE(m.last_id, 0) AS last_id,
-      COALESCE(r.last_read_message_id, 0) AS read_id
-    FROM channels c
-    LEFT JOIN (
-      SELECT channel_id, MAX(id) AS last_id
-      FROM messages GROUP BY channel_id
-    ) m ON m.channel_id = c.id
-    LEFT JOIN channel_reads r
-      ON r.channel_id = c.id AND r.user_name = $1
-    ORDER BY c.name ASC
-    LIMIT 200
-    `,
-    [userName]
-  );
-
-  return rows.map(x => {
-    const lastId = Number(x.last_id || 0);
-    const readId = Number(x.read_id || 0);
-    return { name: x.name, lastId, readId, unread: Math.max(0, lastId - readId) };
-  });
-}
-
-async function sendChannelsState(ws) {
-  const userName = ws.user?.name || "Гость";
-  const channels = await getChannelsStateForUser(userName);
-  send(ws, { type: "channels_state", channels });
-}
-
-async function sendChannelsStateToAll() {
-  for (const c of wss.clients) {
-    if (c.readyState === 1) sendChannelsState(c).catch(() => {});
+wss.on("connection", async (ws, req) => {
+  const user = await wsGetUserFromReq(req);
+  if (!user) {
+    ws.close(4401, "unauthorized");
+    return;
   }
-}
-
-// ===== DM =====
-function normalizeUserPair(a, b) {
-  const A = (a || "").trim().slice(0, 32) || "Гость";
-  const B = (b || "").trim().slice(0, 32) || "Гость";
-  return [A, B].sort((x, y) => x.localeCompare(y));
-}
-
-async function getOrCreateDM(user1, user2) {
-  const [a, b] = normalizeUserPair(user1, user2);
-  const { rows } = await pool.query(
-    `INSERT INTO direct_chats (user_a, user_b)
-     VALUES ($1,$2)
-     ON CONFLICT (user_a, user_b)
-     DO UPDATE SET user_a = EXCLUDED.user_a
-     RETURNING id, user_a, user_b`,
-    [a, b]
-  );
-  return rows[0];
-}
-
-function dmPeer(chat, me) {
-  return chat.user_a === me ? chat.user_b : chat.user_a;
-}
-
-async function loadDMHistory(chatId, limit = 200) {
-  const { rows } = await pool.query(
-    `SELECT id, sender, text, EXTRACT(EPOCH FROM created_at)*1000 AS at
-     FROM direct_messages
-     WHERE chat_id=$1
-     ORDER BY id DESC
-     LIMIT $2`,
-    [chatId, limit]
-  );
-  return rows.reverse().map(r => ({
-    id: Number(r.id),
-    from: r.sender,
-    text: r.text,
-    at: Number(r.at),
-  }));
-}
-
-async function saveDM(chatId, sender, text) {
-  const { rows } = await pool.query(
-    `INSERT INTO direct_messages (chat_id, sender, text)
-     VALUES ($1,$2,$3)
-     RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at`,
-    [chatId, sender, text]
-  );
-  return { id: Number(rows[0].id), at: Number(rows[0].at) };
-}
-
-async function setDMRead(chatId, userName, lastReadId) {
-  await pool.query(
-    `INSERT INTO direct_reads (chat_id, user_name, last_read_message_id)
-     VALUES ($1,$2,$3)
-     ON CONFLICT (chat_id, user_name)
-     DO UPDATE SET last_read_message_id = GREATEST(direct_reads.last_read_message_id, EXCLUDED.last_read_message_id),
-                   updated_at=NOW()`,
-    [chatId, userName, lastReadId]
-  );
-}
-
-async function getDMStateForUser(userName) {
-  const { rows } = await pool.query(
-    `
-    SELECT
-      dc.id AS chat_id,
-      dc.user_a,
-      dc.user_b,
-      COALESCE(dm.last_id, 0) AS last_id,
-      COALESCE(dr.last_read_message_id, 0) AS read_id
-    FROM direct_chats dc
-    LEFT JOIN (
-      SELECT chat_id, MAX(id) AS last_id
-      FROM direct_messages
-      GROUP BY chat_id
-    ) dm ON dm.chat_id = dc.id
-    LEFT JOIN direct_reads dr
-      ON dr.chat_id = dc.id AND dr.user_name = $1
-    WHERE dc.user_a = $1 OR dc.user_b = $1
-    ORDER BY GREATEST(COALESCE(dm.last_id,0), dc.id) DESC
-    LIMIT 200
-    `,
-    [userName]
-  );
-
-  return rows.map(r => {
-    const lastId = Number(r.last_id || 0);
-    const readId = Number(r.read_id || 0);
-    const peer = (r.user_a === userName) ? r.user_b : r.user_a;
-    return { chatId: Number(r.chat_id), peer, lastId, readId, unread: Math.max(0, lastId - readId) };
-  });
-}
-
-async function sendDMState(ws) {
-  const userName = ws.user?.name || "Гость";
-  const dms = await getDMStateForUser(userName);
-  send(ws, { type: "dms_state", dms });
-}
-
-function clientsByName(name) {
-  const res = [];
-  for (const c of wss.clients) {
-    if (c.readyState === 1 && (c.user?.name || "Гость") === name) res.push(c);
-  }
-  return res;
-}
-
-async function sendDMStateToParticipants(a, b) {
-  for (const ws of [...clientsByName(a), ...clientsByName(b)]) {
-    sendDMState(ws).catch(() => {});
-  }
-}
-
-// ===== WS =====
-wss.on("connection", async (ws) => {
+  ws.user = user;
+  ws.channelId = null;
   ws.isAlive = true;
-  ws.user = { name: "Гость" };
-  ws.channel = await getOrCreateChannel("general");
-  ws.mode = "channel";     // 'channel' | 'dm'
-  ws.dm = null;            // {chatId, peer}
-
-  // initial
-  send(ws, { type: "channels", channels: (await listChannels()).map(c => c.name) });
-  await sendChannelsState(ws);
-  await sendDMState(ws);
-
-  send(ws, { type: "joined", channel: ws.channel.name });
-  send(ws, { type: "history", channel: ws.channel.name, messages: await loadHistory(ws.channel.id) });
-
-  broadcastPresence(ws.channel.name);
-  await broadcastSeen(ws.channel);
 
   ws.on("pong", () => (ws.isAlive = true));
+
+  await wsSendInit(ws);
 
   ws.on("message", async (buf) => {
     let msg;
     try { msg = JSON.parse(buf.toString("utf8")); } catch { return; }
 
-    // set name
-    if (msg.type === "hello" && typeof msg.name === "string") {
-      ws.user.name = msg.name.trim().slice(0, 32) || "Гость";
-      broadcastPresence(ws.channel.name);
-      await broadcastSeen(ws.channel);
-
-      await sendChannelsState(ws);
-      await sendDMState(ws);
+    if (msg.type === "join" && typeof msg.channelId === "number") {
+      const channelId = Math.floor(msg.channelId);
+      const allowed = await canAccessChannel(ws.user, channelId);
+      if (!allowed) {
+        wsSend(ws, { type: "error", code: "NO_ACCESS", message: "No access to channel" });
+        return;
+      }
+      ws.channelId = channelId;
+      wsSend(ws, { type: "joined", channelId });
+      wsSend(ws, { type: "history", channelId, messages: await loadChannelHistory(channelId) });
       return;
     }
 
-    // create channel
-    if (msg.type === "create_channel" && typeof msg.name === "string") {
-      await getOrCreateChannel(msg.name);
-      broadcastAll({ type: "channels", channels: (await listChannels()).map(c => c.name) });
-      await sendChannelsStateToAll();
-      return;
-    }
-
-    // join channel
-    if (msg.type === "join" && typeof msg.channel === "string") {
-      const prev = ws.channel;
-      ws.channel = await getOrCreateChannel(msg.channel);
-      ws.mode = "channel";
-      ws.dm = null;
-
-      send(ws, { type: "joined", channel: ws.channel.name });
-      send(ws, { type: "history", channel: ws.channel.name, messages: await loadHistory(ws.channel.id) });
-
-      if (prev?.name) broadcastPresence(prev.name);
-      broadcastPresence(ws.channel.name);
-
-      await broadcastSeen(ws.channel);
-      await sendChannelsState(ws);
-      return;
-    }
-
-    // channel seen
-    if (msg.type === "seen" && typeof msg.seq === "number") {
-      if (ws.mode !== "channel") return;
-      const lastRead = Math.max(0, Math.floor(msg.seq));
-      await setChannelRead(ws.channel.id, ws.user.name || "Гость", lastRead);
-
-      await broadcastSeen(ws.channel);
-      await sendChannelsState(ws);
-      return;
-    }
-
-    // channel chat
     if (msg.type === "chat" && typeof msg.text === "string") {
       const text = msg.text.trim();
       if (!text) return;
+      if (!ws.channelId) return;
 
-      const saved = await saveMessage(ws.channel.id, ws.user.name || "Гость", text.slice(0, 2000));
-      const message = { id: saved.id, at: saved.at, from: ws.user.name || "Гость", text: text.slice(0, 2000) };
-
-      broadcastToChannel(ws.channel.name, { type: "chat", channel: ws.channel.name, message });
-
-      await broadcastSeen(ws.channel);
-      await sendChannelsStateToAll();
-      return;
-    }
-
-    // open dm (create if needed)
-    if (msg.type === "open_dm" && typeof msg.peer === "string") {
-      const me = ws.user.name || "Гость";
-      const peer = msg.peer.trim().slice(0, 32);
-      if (!peer || peer === me) return;
-
-      const chat = await getOrCreateDM(me, peer);
-      const actualPeer = dmPeer(chat, me);
-
-      ws.mode = "dm";
-      ws.dm = { chatId: Number(chat.id), peer: actualPeer };
-
-      send(ws, {
-        type: "dm_joined",
-        peer: actualPeer,
-        chatId: Number(chat.id),
-        messages: await loadDMHistory(chat.id),
-      });
-
-      await sendDMState(ws);
-      return;
-    }
-
-    // dm seen
-    if (msg.type === "dm_seen" && typeof msg.seq === "number" && typeof msg.chatId === "number") {
-      const me = ws.user.name || "Гость";
-      const chatId = Math.floor(msg.chatId);
-      const lastRead = Math.max(0, Math.floor(msg.seq));
-      await setDMRead(chatId, me, lastRead);
-      await sendDMState(ws);
-      return;
-    }
-
-    // dm send
-    if (msg.type === "dm_send" && typeof msg.text === "string" && typeof msg.chatId === "number") {
-      const me = ws.user.name || "Гость";
-      const chatId = Math.floor(msg.chatId);
-      const text = msg.text.trim();
-      if (!text) return;
-
-      // кто участники?
-      const { rows } = await pool.query(
-        `SELECT id, user_a, user_b FROM direct_chats WHERE id=$1 LIMIT 1`,
-        [chatId]
-      );
-      if (!rows.length) return;
-      const chat = rows[0];
-      if (chat.user_a !== me && chat.user_b !== me) return;
-
-      const peer = (chat.user_a === me) ? chat.user_b : chat.user_a;
-
-      const saved = await saveDM(chatId, me, text.slice(0, 2000));
-      const message = { id: saved.id, at: saved.at, from: me, text: text.slice(0, 2000) };
-
-      // отправляем всем вкладкам обоих участников
-      for (const c of wss.clients) {
-        if (c.readyState !== 1) continue;
-        const name = c.user?.name || "Гость";
-        if (name === me || name === peer) {
-          send(c, { type: "dm_message", chatId, peer: name === me ? peer : me, message });
-        }
+      const allowed = await canAccessChannel(ws.user, ws.channelId);
+      if (!allowed) {
+        wsSend(ws, { type: "error", code: "NO_ACCESS", message: "No access to channel" });
+        return;
       }
 
-      await sendDMStateToParticipants(me, peer);
-      return;
-    }
-  });
+      const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000));
+      const message = {
+        id: saved.id,
+        at: saved.at,
+        from: ws.user.displayName,
+        text: text.slice(0, 2000),
+      };
 
-  ws.on("close", async () => {
-    if (ws.channel?.name) {
-      broadcastPresence(ws.channel.name);
-      await broadcastSeen(ws.channel);
+      broadcastToChannelId(ws.channelId, { type: "chat", channelId: ws.channelId, message });
+      return;
     }
   });
 });
