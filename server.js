@@ -93,14 +93,12 @@ function sendToUser(userId, obj) {
     if (ws.readyState === 1) ws.send(payload);
   }
 }
-
 function broadcastAll(obj) {
   const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
     if (c.readyState === 1) c.send(payload);
   }
 }
-
 function getOnlineUserIds() {
   return [...onlineCounts.keys()];
 }
@@ -154,7 +152,6 @@ function requireOwnerOrAdmin(req, res, next) {
   if (u.systemRole === "OWNER" || u.systemRole === "ADMIN") return next();
   return fail(res, 403, "FORBIDDEN", "Not enough permissions");
 }
-
 function requireOwner(req, res, next) {
   const u = req.user;
   if (u.isSuperadmin) return next();
@@ -197,8 +194,8 @@ async function canAccessChannel(user, channelId) {
 }
 
 /**
- * Возвращает каналы + lastMessageId + unreadCount для конкретного пользователя.
- * unreadCount = сколько сообщений в канале с id > last_read_message_id (для этого пользователя)
+ * Каналы + unreadCount
+ * ВАЖНО: unreadCount не считает сообщения, отправленные самим пользователем.
  */
 async function listAccessibleChannelsWithUnread(user) {
   if (user.isSuperadmin || user.systemRole === "OWNER") {
@@ -224,6 +221,7 @@ async function listAccessibleChannelsWithUnread(user) {
         FROM channel_messages m
         WHERE m.channel_id = c.id
           AND m.id > COALESCE(cr.last_read_message_id, 0)
+          AND m.sender_user_id <> $1
       ) uc ON true
       ORDER BY c.name ASC
       LIMIT 200
@@ -275,6 +273,7 @@ async function listAccessibleChannelsWithUnread(user) {
       FROM channel_messages m
       WHERE m.channel_id = a.id
         AND m.id > COALESCE(cr.last_read_message_id, 0)
+        AND m.sender_user_id <> $1
     ) uc ON true
     ORDER BY a.name ASC
     LIMIT 200
@@ -300,7 +299,9 @@ async function auditLog(actorUserId, action, metaObj) {
 }
 
 /* =========================
-   Read receipts (channels, вариант Б)
+   Read receipts (channels, вариант B)
+   - total = все пользователи, у кого есть доступ (плюс OWNER + SUPERADMIN)
+   - readCount = сколько из них last_read >= messageId
 ========================= */
 async function getSuperadminUserIdOrNull() {
   if (!SUPERADMIN_EMAIL) return null;
@@ -355,6 +356,19 @@ async function getEligibleUserIdsForChannel(channelId) {
   return rows.map(r => Number(r.id));
 }
 
+async function upsertChannelRead(channelId, userId, lastReadMessageId) {
+  await pool.query(
+    `
+    INSERT INTO channel_reads (channel_id, user_id, last_read_message_id, updated_at)
+    VALUES ($1,$2,$3,NOW())
+    ON CONFLICT (channel_id, user_id)
+    DO UPDATE SET last_read_message_id = GREATEST(channel_reads.last_read_message_id, EXCLUDED.last_read_message_id),
+                  updated_at = NOW()
+    `,
+    [channelId, userId, lastReadMessageId]
+  );
+}
+
 async function getReadProgressForMessage(channelId, messageId) {
   const eligibleIds = await getEligibleUserIdsForChannel(channelId);
   if (!eligibleIds.length) return { readCount: 0, total: 0 };
@@ -375,21 +389,47 @@ async function getReadProgressForMessage(channelId, messageId) {
   return { readCount: Number(rows[0]?.read_count || 0), total: Number(rows[0]?.total || 0) };
 }
 
-async function upsertChannelRead(channelId, userId, lastReadMessageId) {
-  await pool.query(
-    `
-    INSERT INTO channel_reads (channel_id, user_id, last_read_message_id, updated_at)
-    VALUES ($1,$2,$3,NOW())
-    ON CONFLICT (channel_id, user_id)
-    DO UPDATE SET last_read_message_id = GREATEST(channel_reads.last_read_message_id, EXCLUDED.last_read_message_id),
-                  updated_at = NOW()
-    `,
-    [channelId, userId, lastReadMessageId]
+/**
+ * Батч: берём last_read по eligible и считаем readCount для набора messageIds.
+ * Это нужно, чтобы при одном "read" корректно обновлялись счётчики не только у последнего сообщения.
+ */
+async function getReadProgressBatch(channelId, messageIds) {
+  const eligibleIds = await getEligibleUserIdsForChannel(channelId);
+  const total = eligibleIds.length;
+  if (!total || !messageIds.length) return { total, items: [] };
+
+  const { rows } = await pool.query(
+    `SELECT user_id, last_read_message_id
+     FROM channel_reads
+     WHERE channel_id=$1 AND user_id = ANY($2::int[])`,
+    [channelId, eligibleIds]
   );
+
+  const lastReadByUser = new Map();
+  for (const rr of rows) lastReadByUser.set(Number(rr.user_id), Number(rr.last_read_message_id));
+
+  const items = messageIds.map((mid) => {
+    let readCount = 0;
+    for (const uid of eligibleIds) {
+      const last = lastReadByUser.get(uid) || 0;
+      if (last >= mid) readCount += 1;
+    }
+    return { messageId: mid, readCount, total };
+  });
+
+  return { total, items };
+}
+
+async function getLastChannelMessageIds(channelId, limit = 30) {
+  const { rows } = await pool.query(
+    `SELECT id FROM channel_messages WHERE channel_id=$1 ORDER BY id DESC LIMIT $2`,
+    [channelId, limit]
+  );
+  return rows.map(r => Number(r.id)).reverse();
 }
 
 /* =========================
-   DM (личные сообщения) + unread
+   DM + unread
 ========================= */
 async function ensureDmChat(userAId, userBId) {
   const a = Math.min(userAId, userBId);
@@ -486,13 +526,11 @@ async function loadDmHistory(chatId, limit = 200) {
     read: { readCount: 0, total: 0 },
   }));
 
-  if (!messages.length) return messages;
-
-  // прогресс только для хвоста
   const tail = messages.slice(Math.max(0, messages.length - 50));
   for (const m of tail) {
     m.read = await getDmReadProgress(chatId, m.id);
   }
+
   return messages;
 }
 
@@ -639,8 +677,9 @@ async function migrate() {
     );
   }
 
-  // полезные индексы для unread (быстрее)
+  // индексы (ускоряют unread/last)
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_id_id ON channel_messages(channel_id, id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_sender_id_id ON channel_messages(channel_id, sender_user_id, id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_dm_messages_chat_id_id ON dm_messages(chat_id, id);`);
 }
 
@@ -802,13 +841,11 @@ app.get("/api/me", requireAuth, async (req, res) => {
   });
 });
 
-// channels with unread
 app.get("/api/channels", requireAuth, async (req, res) => {
   const channels = await listAccessibleChannelsWithUnread(req.user);
   ok(res, { channels });
 });
 
-/* ===== Users list for DM start ===== */
 app.get("/api/users", requireAuth, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, display_name, email, system_role
@@ -828,7 +865,6 @@ app.get("/api/users", requireAuth, async (req, res) => {
   });
 });
 
-/* ===== DM list with unread ===== */
 app.get("/api/dm", requireAuth, async (req, res) => {
   const meId = req.user.id;
   const { rows } = await pool.query(
@@ -895,7 +931,6 @@ app.get("/api/dm", requireAuth, async (req, res) => {
   ok(res, { chats });
 });
 
-/* ===== Create or open DM with user ===== */
 app.post("/api/dm/open", requireAuth, async (req, res) => {
   const otherUserId = Number(req.body.userId || 0);
   if (!otherUserId) return fail(res, 400, "BAD_INPUT", "userId required");
@@ -909,7 +944,7 @@ app.post("/api/dm/open", requireAuth, async (req, res) => {
   ok(res, { chatId });
 });
 
-/* ===== Admin endpoints (existing) ===== */
+/* ===== Admin endpoints (как было) ===== */
 app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, email, display_name, system_role, created_at
@@ -1088,7 +1123,6 @@ app.get("/api/audit", requireAuth, requireOwner, async (_req, res) => {
   });
 });
 
-/* ===== DM AUDIT (OWNER/SUPERADMIN) ===== */
 app.get("/api/admin/dm/chats", requireAuth, requireOwner, async (_req, res) => {
   const { rows } = await pool.query(
     `
@@ -1209,30 +1243,16 @@ async function loadChannelHistoryWithReads(channelId, limit = 200) {
 
   if (!messages.length) return { messages, totalEligible: 0, lastMessageId: 0 };
 
-  const eligibleIds = await getEligibleUserIdsForChannel(channelId);
-  const total = eligibleIds.length;
-
-  const { rows: readRows } = await pool.query(
-    `SELECT user_id, last_read_message_id
-     FROM channel_reads
-     WHERE channel_id=$1 AND user_id = ANY($2::int[])`,
-    [channelId, eligibleIds.length ? eligibleIds : [0]]
-  );
-
-  const lastReadByUser = new Map();
-  for (const rr of readRows) lastReadByUser.set(Number(rr.user_id), Number(rr.last_read_message_id));
-
-  for (const m of messages.slice(Math.max(0, messages.length - 50))) {
-    let readCount = 0;
-    for (const uid of eligibleIds) {
-      const last = lastReadByUser.get(uid) || 0;
-      if (last >= m.id) readCount += 1;
-    }
-    m.read = { readCount, total };
+  const tailIds = messages.slice(Math.max(0, messages.length - 30)).map(m => m.id);
+  const batch = await getReadProgressBatch(channelId, tailIds);
+  const map = new Map(batch.items.map(x => [x.messageId, { readCount: x.readCount, total: x.total }]));
+  for (const m of messages) {
+    const rr = map.get(m.id);
+    if (rr) m.read = rr;
   }
 
   const lastMessageId = messages[messages.length - 1].id;
-  return { messages, totalEligible: total, lastMessageId };
+  return { messages, totalEligible: batch.total || 0, lastMessageId };
 }
 
 async function saveChannelMessage(channelId, senderUserId, text) {
@@ -1251,12 +1271,17 @@ function broadcastToChannelId(channelId, obj) {
     if (c.readyState === 1 && c.channelId === channelId) c.send(payload);
   }
 }
-
 function broadcastToDmChatId(chatId, obj) {
   const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
     if (c.readyState === 1 && c.dmChatId === chatId) c.send(payload);
   }
+}
+
+async function broadcastChannelReadBatch(channelId) {
+  const ids = await getLastChannelMessageIds(channelId, 30);
+  const batch = await getReadProgressBatch(channelId, ids);
+  broadcastToChannelId(channelId, { type: "read_progress_batch", channelId, items: batch.items });
 }
 
 wss.on("connection", async (ws, req) => {
@@ -1305,11 +1330,13 @@ wss.on("connection", async (ws, req) => {
       wsSend(ws, { type: "joined", channelId, totalEligible: history.totalEligible });
       wsSend(ws, { type: "history", channelId, messages: history.messages, totalEligible: history.totalEligible });
 
-      // при заходе считаем, что прочитал последнее сообщение
       if (history.lastMessageId) {
         await upsertChannelRead(channelId, ws.user.id, history.lastMessageId);
 
-        // обновим unread для списка у этого пользователя
+        // батч прогресса, чтобы всем обновились "прочитано X/Y"
+        await broadcastChannelReadBatch(channelId);
+
+        // обновим unread у этого пользователя (в списке слева)
         sendToUser(ws.user.id, { type: "refresh_lists" });
       }
       return;
@@ -1342,7 +1369,10 @@ wss.on("connection", async (ws, req) => {
         }
       });
 
-      // уведомление ВСЕМ: "в канале новые сообщения" -> клиент сам перезапросит /api/channels
+      // обновим батч (вдруг sender = первый читатель и т.п.)
+      await broadcastChannelReadBatch(ws.channelId);
+
+      // уведомление всем: чтобы обновили unread бейджи
       broadcastAll({ type: "channel_notice", channelId: ws.channelId });
 
       return;
@@ -1355,16 +1385,11 @@ wss.on("connection", async (ws, req) => {
       if (!allowed) return;
 
       await upsertChannelRead(channelId, ws.user.id, lastReadMessageId);
-      const prog = await getReadProgressForMessage(channelId, lastReadMessageId);
 
-      broadcastToChannelId(channelId, {
-        type: "read_progress",
-        channelId,
-        messageId: lastReadMessageId,
-        read: { readCount: prog.readCount, total: prog.total },
-      });
+      // батч обновление прогресса для последних сообщений
+      await broadcastChannelReadBatch(channelId);
 
-      // обновим unread у текущего пользователя (в списке слева)
+      // обновим unread у текущего пользователя
       sendToUser(ws.user.id, { type: "refresh_lists" });
       return;
     }
@@ -1398,7 +1423,7 @@ wss.on("connection", async (ws, req) => {
         const prog = await getDmReadProgress(chatId, lastId);
         broadcastToDmChatId(chatId, { type: "dm_read_progress", chatId, messageId: lastId, read: prog });
 
-        // обновим unread у юзера
+        // refresh list for unread
         sendToUser(ws.user.id, { type: "refresh_lists" });
       }
       return;
@@ -1430,13 +1455,11 @@ wss.on("connection", async (ws, req) => {
         }
       });
 
-      // уведомим участников чата, чтобы обновили список DM (бейджи/последнее сообщение)
       const participants = await getDmParticipants(chatId);
       for (const uid of participants) {
         sendToUser(uid, { type: "dm_notice", chatId });
         sendToUser(uid, { type: "refresh_lists" });
       }
-
       return;
     }
 
@@ -1451,8 +1474,6 @@ wss.on("connection", async (ws, req) => {
       const prog = await getDmReadProgress(chatId, lastReadMessageId);
 
       broadcastToDmChatId(chatId, { type: "dm_read_progress", chatId, messageId: lastReadMessageId, read: prog });
-
-      // обновим unread у этого пользователя
       sendToUser(ws.user.id, { type: "refresh_lists" });
       return;
     }
