@@ -11,7 +11,6 @@ const { Pool } = pg;
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
-
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
@@ -30,36 +29,28 @@ const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || "").trim().toLowerCase
 function nowIso() {
   return new Date().toISOString();
 }
-
 function randToken() {
   return crypto.randomBytes(32).toString("hex");
 }
-
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
-
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
-
 function normalizeName(name) {
   return String(name || "").trim().slice(0, 48) || "User";
 }
-
 function normalizeChannelName(name) {
   const safe = String(name || "").toLowerCase().trim().slice(0, 40);
   return safe.replace(/\s+/g, "-").replace(/[^a-z0-9\-_]/g, "") || "general";
 }
-
 function ok(res, data) {
   res.json({ ok: true, ...data });
 }
-
 function fail(res, status, code, message) {
   res.status(status).json({ ok: false, code, message });
 }
-
 async function queryOne(sql, params) {
   const { rows } = await pool.query(sql, params);
   return rows[0] || null;
@@ -129,26 +120,22 @@ async function getUserCustomRoleIds(userId) {
     `SELECT role_id FROM user_roles WHERE user_id = $1`,
     [userId]
   );
-  return rows.map(r => Number(r.role_id));
+  return rows.map((r) => Number(r.role_id));
 }
 
 async function canAccessChannel(user, channelId) {
-  // OWNER & SUPERADMIN: always
   if (user.isSuperadmin || user.systemRole === "OWNER") return true;
 
-  // public channel?
   const ch = await queryOne(`SELECT id, is_public FROM channels WHERE id=$1`, [channelId]);
   if (!ch) return false;
   if (ch.is_public) return true;
 
-  // explicit user access?
   const uacc = await queryOne(
     `SELECT 1 FROM channel_user_access WHERE channel_id=$1 AND user_id=$2`,
     [channelId, user.id]
   );
   if (uacc) return true;
 
-  // role access?
   const roleIds = await getUserCustomRoleIds(user.id);
   if (!roleIds.length) return false;
 
@@ -164,7 +151,7 @@ async function listAccessibleChannels(user) {
     const { rows } = await pool.query(
       `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
     );
-    return rows.map(r => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
+    return rows.map((r) => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
   }
 
   const roleIds = await getUserCustomRoleIds(user.id);
@@ -186,7 +173,7 @@ async function listAccessibleChannels(user) {
     [user.id, roleIds.length ? roleIds : null]
   );
 
-  return rows.map(r => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
+  return rows.map((r) => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
 }
 
 async function auditLog(actorUserId, action, metaObj) {
@@ -267,14 +254,17 @@ async function migrate() {
     );
   `);
 
-  // seed base channels
+  // Upgrade older DBs safely
+  await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true;`);
+  await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+
   await pool.query(
-    `INSERT INTO channels (name, is_public) VALUES ($1, $2)
+    `INSERT INTO channels (name, is_public)
+     VALUES ($1, $2)
      ON CONFLICT (name) DO NOTHING`,
     ["general", true]
   );
 
-  // seed default positions (должности/кастомные роли)
   const seeds = [
     { name: "worker", display: "Рабочий" },
     { name: "manager", display: "Менеджер" },
@@ -293,18 +283,19 @@ async function migrate() {
 /* =========================
    REST API
 ========================= */
-
-// Public: list positions (for registration dropdown)
 app.get("/api/positions", async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, name, display_name FROM roles ORDER BY id ASC LIMIT 200`
   );
   ok(res, {
-    positions: rows.map(r => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+    positions: rows.map((r) => ({
+      id: Number(r.id),
+      name: r.name,
+      displayName: r.display_name,
+    })),
   });
 });
 
-// Register
 app.post("/api/register", async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const password = String(req.body.password || "");
@@ -320,7 +311,6 @@ app.post("/api/register", async (req, res) => {
 
   const hash = await bcrypt.hash(password, 10);
 
-  // first user becomes OWNER
   const countRow = await queryOne(`SELECT COUNT(*)::int AS c FROM users`, []);
   const isFirst = Number(countRow?.c || 0) === 0;
   const systemRole = isFirst ? "OWNER" : "MEMBER";
@@ -332,7 +322,6 @@ app.post("/api/register", async (req, res) => {
     [email, hash, displayName, systemRole]
   );
 
-  // assign position role
   await pool.query(
     `INSERT INTO user_roles (user_id, role_id)
      VALUES ($1,$2)
@@ -340,7 +329,6 @@ app.post("/api/register", async (req, res) => {
     [user.id, positionRoleId]
   );
 
-  // create session
   const token = randToken();
   await pool.query(
     `INSERT INTO sessions (token, user_id, expires_at)
@@ -371,7 +359,6 @@ app.post("/api/register", async (req, res) => {
   });
 });
 
-// Login
 app.post("/api/login", async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const password = String(req.body.password || "");
@@ -419,7 +406,6 @@ app.post("/api/login", async (req, res) => {
   });
 });
 
-// Logout
 app.post("/api/logout", requireAuth, async (req, res) => {
   await pool.query(`DELETE FROM sessions WHERE token=$1`, [req.sessionToken]);
   res.setHeader(
@@ -436,7 +422,6 @@ app.post("/api/logout", requireAuth, async (req, res) => {
   ok(res, {});
 });
 
-// Me
 app.get("/api/me", requireAuth, async (req, res) => {
   const roleIds = await getUserCustomRoleIds(req.user.id);
   const { rows } = await pool.query(
@@ -446,18 +431,22 @@ app.get("/api/me", requireAuth, async (req, res) => {
 
   ok(res, {
     me: req.user,
-    customRoles: rows.map(r => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+    customRoles: rows.map((r) => ({
+      id: Number(r.id),
+      name: r.name,
+      displayName: r.display_name,
+    })),
   });
 });
 
-// Channels accessible
 app.get("/api/channels", requireAuth, async (req, res) => {
   const channels = await listAccessibleChannels(req.user);
   ok(res, { channels });
 });
 
-// Admin: list users
-app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+/* ===== Admin endpoints ===== */
+
+app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, email, display_name, system_role, created_at
      FROM users
@@ -465,7 +454,7 @@ app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (req, res) =
      LIMIT 500`
   );
   ok(res, {
-    users: rows.map(u => ({
+    users: rows.map((u) => ({
       id: Number(u.id),
       email: u.email,
       displayName: u.display_name,
@@ -475,21 +464,37 @@ app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (req, res) =
   });
 });
 
-// Admin: list roles
 app.get("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, name, display_name FROM roles ORDER BY id ASC LIMIT 200`
   );
   ok(res, {
-    roles: rows.map(r => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+    roles: rows.map((r) => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
   });
 });
 
-// Admin: create role (custom)
+// NEW: roles of a user
+app.get("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  if (!userId) return fail(res, 400, "BAD_INPUT", "bad user id");
+
+  const { rows } = await pool.query(
+    `SELECT r.id, r.name, r.display_name
+     FROM user_roles ur
+     JOIN roles r ON r.id = ur.role_id
+     WHERE ur.user_id = $1
+     ORDER BY r.id ASC`,
+    [userId]
+  );
+
+  ok(res, {
+    roles: rows.map((r) => ({ id: Number(r.id), name: r.name, displayName: r.display_name })),
+  });
+});
+
 app.post("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const name = String(req.body.name || "").trim().toLowerCase().slice(0, 32).replace(/\s+/g, "-");
   const displayName = String(req.body.displayName || "").trim().slice(0, 48);
-
   if (!name || !displayName) return fail(res, 400, "BAD_ROLE", "Role name/displayName required");
 
   const row = await queryOne(
@@ -499,20 +504,17 @@ app.post("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (req, res) 
      RETURNING id, name, display_name`,
     [name, displayName]
   );
-
   if (!row) return fail(res, 409, "ROLE_EXISTS", "Role already exists");
 
   await auditLog(req.user.id, "ROLE_CREATE", { name, displayName, at: nowIso() });
   ok(res, { role: { id: Number(row.id), name: row.name, displayName: row.display_name } });
 });
 
-// Admin: assign custom role to user
 app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   const roleId = Number(req.body.roleId || 0);
   if (!userId || !roleId) return fail(res, 400, "BAD_INPUT", "userId/roleId required");
 
-  // don't allow changing OWNER via this endpoint
   const target = await queryOne(`SELECT id, system_role FROM users WHERE id=$1`, [userId]);
   if (!target) return fail(res, 404, "NOT_FOUND", "User not found");
 
@@ -527,7 +529,29 @@ app.post("/api/admin/users/:id/roles", requireAuth, requireOwnerOrAdmin, async (
   ok(res, {});
 });
 
-// Admin: create channel
+// NEW: remove role from user
+app.delete("/api/admin/users/:id/roles/:roleId", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  const roleId = Number(req.params.roleId);
+  if (!userId || !roleId) return fail(res, 400, "BAD_INPUT", "bad ids");
+
+  await pool.query(
+    `DELETE FROM user_roles WHERE user_id=$1 AND role_id=$2`,
+    [userId, roleId]
+  );
+
+  await auditLog(req.user.id, "USER_ROLE_REMOVE", { userId, roleId, at: nowIso() });
+  ok(res, {});
+});
+
+// NEW: list ALL channels for admin (so access editing works reliably)
+app.get("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
+  );
+  ok(res, { channels: rows.map(c => ({ id: Number(c.id), name: c.name, isPublic: c.is_public })) });
+});
+
 app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const name = normalizeChannelName(req.body.name);
   const isPublic = Boolean(req.body.isPublic);
@@ -545,7 +569,27 @@ app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, re
   ok(res, { channel: { id: Number(ch.id), name: ch.name, isPublic: ch.is_public } });
 });
 
-// Admin: set channel access (roles + users)
+// NEW: get current access for channel
+app.get("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const channelId = Number(req.params.id);
+  const ch = await queryOne(`SELECT id FROM channels WHERE id=$1`, [channelId]);
+  if (!ch) return fail(res, 404, "NOT_FOUND", "Channel not found");
+
+  const r = await pool.query(
+    `SELECT role_id FROM channel_role_access WHERE channel_id=$1`,
+    [channelId]
+  );
+  const u = await pool.query(
+    `SELECT user_id FROM channel_user_access WHERE channel_id=$1`,
+    [channelId]
+  );
+
+  ok(res, {
+    roleIds: r.rows.map(x => Number(x.role_id)),
+    userIds: u.rows.map(x => Number(x.user_id)),
+  });
+});
+
 app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const channelId = Number(req.params.id);
   const roleIds = Array.isArray(req.body.roleIds) ? req.body.roleIds.map(Number).filter(Boolean) : [];
@@ -554,11 +598,9 @@ app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asy
   const ch = await queryOne(`SELECT id FROM channels WHERE id=$1`, [channelId]);
   if (!ch) return fail(res, 404, "NOT_FOUND", "Channel not found");
 
-  // clear old
   await pool.query(`DELETE FROM channel_role_access WHERE channel_id=$1`, [channelId]);
   await pool.query(`DELETE FROM channel_user_access WHERE channel_id=$1`, [channelId]);
 
-  // add new
   for (const rid of roleIds) {
     await pool.query(
       `INSERT INTO channel_role_access (channel_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
@@ -576,7 +618,6 @@ app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asy
   ok(res, {});
 });
 
-// Owner-only: transfer ownership (audit + safety)
 app.post("/api/owner/transfer", requireAuth, requireOwner, async (req, res) => {
   const newOwnerId = Number(req.body.userId || 0);
   if (!newOwnerId) return fail(res, 400, "BAD_INPUT", "userId required");
@@ -584,17 +625,14 @@ app.post("/api/owner/transfer", requireAuth, requireOwner, async (req, res) => {
   const target = await queryOne(`SELECT id FROM users WHERE id=$1`, [newOwnerId]);
   if (!target) return fail(res, 404, "NOT_FOUND", "User not found");
 
-  // make current owner admin (optional)
   await pool.query(`UPDATE users SET system_role='ADMIN' WHERE id=$1`, [req.user.id]);
   await pool.query(`UPDATE users SET system_role='OWNER' WHERE id=$1`, [newOwnerId]);
 
   await auditLog(req.user.id, "OWNER_TRANSFER", { toUserId: newOwnerId, at: nowIso() });
-
   ok(res, {});
 });
 
-// Audit logs (Owner/Superadmin only)
-app.get("/api/audit", requireAuth, requireOwner, async (req, res) => {
+app.get("/api/audit", requireAuth, requireOwner, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT a.id, a.action, a.meta, a.created_at, u.email, u.display_name
      FROM audit_logs a
@@ -604,7 +642,7 @@ app.get("/api/audit", requireAuth, requireOwner, async (req, res) => {
   );
 
   ok(res, {
-    logs: rows.map(r => ({
+    logs: rows.map((r) => ({
       id: Number(r.id),
       action: r.action,
       meta: r.meta,
@@ -644,7 +682,7 @@ async function loadChannelHistory(channelId, limit = 200) {
      LIMIT $2`,
     [channelId, limit]
   );
-  return rows.reverse().map(r => ({
+  return rows.reverse().map((r) => ({
     id: Number(r.id),
     text: r.text,
     at: Number(r.at),
@@ -665,9 +703,7 @@ async function saveChannelMessage(channelId, senderUserId, text) {
 function broadcastToChannelId(channelId, obj) {
   const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
-    if (c.readyState === 1 && c.channelId === channelId) {
-      c.send(payload);
-    }
+    if (c.readyState === 1 && c.channelId === channelId) c.send(payload);
   }
 }
 
@@ -677,12 +713,12 @@ wss.on("connection", async (ws, req) => {
     ws.close(4401, "unauthorized");
     return;
   }
+
   ws.user = user;
   ws.channelId = null;
   ws.isAlive = true;
 
   ws.on("pong", () => (ws.isAlive = true));
-
   await wsSendInit(ws);
 
   ws.on("message", async (buf) => {
@@ -714,12 +750,7 @@ wss.on("connection", async (ws, req) => {
       }
 
       const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000));
-      const message = {
-        id: saved.id,
-        at: saved.at,
-        from: ws.user.displayName,
-        text: text.slice(0, 2000),
-      };
+      const message = { id: saved.id, at: saved.at, from: ws.user.displayName, text: text.slice(0, 2000) };
 
       broadcastToChannelId(ws.channelId, { type: "chat", channelId: ws.channelId, message });
       return;
