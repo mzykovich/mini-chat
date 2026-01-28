@@ -3,561 +3,676 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Mini Chat</title>
+  <title>Corp Chat Template</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #0b1220; color: #e6edf3; }
-    .app { display:flex; height: 100vh; }
-    .side { width: 300px; padding: 12px; border-right:1px solid #1f2a44; background:#0a1020; box-sizing: border-box; overflow:auto; }
-    .main { flex:1; display:flex; flex-direction:column; padding: 12px; box-sizing: border-box; }
-    .card { background:#111a2e; border:1px solid #1f2a44; border-radius: 12px; padding: 10px; }
-    .list { margin-top: 10px; display:flex; flex-direction:column; gap:6px; }
-    .item {
-      padding: 8px 10px;
-      border-radius: 10px;
-      border:1px solid #1f2a44;
-      background:#0f172a;
-      cursor:pointer;
-      user-select:none;
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:10px;
-    }
-    .item:hover { filter: brightness(1.08); }
-    .item.active { outline: 2px solid #1f6feb; background:#0b1b3a; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:#0b1220; color:#e6edf3; }
+    .app { display:flex; height:100vh; }
+    .side { width:320px; padding:12px; border-right:1px solid #1f2a44; background:#0a1020; box-sizing:border-box; overflow:auto; }
+    .main { flex:1; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; }
+    .card { background:#111a2e; border:1px solid #1f2a44; border-radius:12px; padding:10px; }
+    .row { display:flex; gap:10px; margin-top:10px; }
+    input, select, button, textarea { border-radius:10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding:10px; }
+    input, select, textarea { width:100%; box-sizing:border-box; }
+    button { cursor:pointer; white-space:nowrap; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .muted { opacity:.75; font-size:12px; }
+    .list { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+    .item { padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
+    .item:hover { filter:brightness(1.08); }
+    .item.active { outline:2px solid #1f6feb; background:#0b1b3a; }
 
-    .badge {
-      min-width: 22px;
-      height: 18px;
-      padding: 0 6px;
-      border-radius: 999px;
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      font-size: 12px;
-      background: #dc2626;
-      color: white;
-      border: 1px solid rgba(255,255,255,.15);
-    }
+    #log { flex:1; overflow:auto; padding:12px; background:#0f172a; border-radius:12px; border:1px solid #1f2a44; margin-top:10px; }
+    .msg { margin:10px 0; }
+    .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; }
+    .bubble { display:inline-block; padding:10px 12px; border-radius:12px; background:#1b243b; white-space:pre-wrap; max-width:100%; }
 
-    #log { flex:1; overflow:auto; padding: 12px; background:#0f172a; border-radius: 12px; border:1px solid #1f2a44; margin-top: 10px; }
-    .msg { margin: 10px 0; }
-    .meta { opacity:.75; font-size: 12px; display:flex; gap:10px; align-items:center; justify-content:space-between; }
-    .bubble { display:inline-block; padding:10px 12px; border-radius: 12px; background:#1b243b; max-width: 100%; white-space: pre-wrap; }
-    .row { display:flex; gap:10px; margin-top: 10px; }
-    input, button { border-radius: 10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding: 10px; }
-    input { flex: 1; }
-    button { cursor:pointer; }
-    button:disabled { opacity: .6; cursor:not-allowed; }
-    .status { font-size: 12px; opacity:.8; margin-top: 8px; }
+    .tabs { display:flex; gap:8px; margin-top:10px; }
+    .tab { padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
+    .tab.active { outline:2px solid #1f6feb; background:#0b1b3a; }
+    .hidden { display:none !important; }
 
-    .copyBtn { opacity: 0; transition: opacity .15s ease; }
-    .msg:hover .copyBtn { opacity: 1; }
-
-    mark { background: rgba(255, 235, 59, 0.25); color: inherit; padding: 0 2px; border-radius: 4px; }
-    .muted { opacity:.65; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .hr { height:1px; background:#1f2a44; margin:10px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; font-size:12px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2a3a63; background:#0b1220; font-size:12px; opacity:.9; }
   </style>
 </head>
 <body>
 <div class="app">
   <div class="side">
     <div class="card">
-      <div><b>Mini Chat</b></div>
-      <div class="status" id="presence">Подключение…</div>
-      <div class="row" style="margin-top:8px;">
-        <input id="name" placeholder="Твой ник" maxlength="32"/>
-        <button id="saveName">OK</button>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+        <div>
+          <div><b id="brand">Corp Chat</b></div>
+          <div class="muted" id="status">Проверка сессии…</div>
+        </div>
+        <button id="logoutBtn" class="hidden">Выйти</button>
       </div>
-      <div class="status muted">Ctrl+Y — поиск • Esc — очистить</div>
+
+      <!-- Auth -->
+      <div id="authBox" class="row" style="flex-direction:column;">
+        <div class="tabs">
+          <div id="tabLogin" class="tab active">Вход</div>
+          <div id="tabRegister" class="tab">Регистрация</div>
+        </div>
+
+        <div id="loginForm">
+          <div class="row" style="margin-top:0;">
+            <input id="loginEmail" placeholder="Email" />
+          </div>
+          <div class="row">
+            <input id="loginPass" placeholder="Пароль" type="password" />
+          </div>
+          <div class="row">
+            <button id="loginBtn">Войти</button>
+          </div>
+          <div class="muted" id="loginMsg"></div>
+        </div>
+
+        <div id="registerForm" class="hidden">
+          <div class="row" style="margin-top:0;">
+            <input id="regName" placeholder="Имя (как будет видно в чате)" />
+          </div>
+          <div class="row">
+            <input id="regEmail" placeholder="Email" />
+          </div>
+          <div class="row">
+            <input id="regPass" placeholder="Пароль (мин 6 символов)" type="password" />
+          </div>
+          <div class="row">
+            <select id="regPosition"></select>
+          </div>
+          <div class="row">
+            <button id="registerBtn">Зарегистрироваться</button>
+          </div>
+          <div class="muted" id="registerMsg"></div>
+        </div>
+      </div>
+
+      <!-- User info -->
+      <div id="meBox" class="hidden" style="margin-top:10px;">
+        <div><b id="meName"></b> <span class="pill" id="meRole"></span></div>
+        <div class="muted" id="meEmail"></div>
+      </div>
     </div>
 
-    <div class="card" style="margin-top:10px;">
-      <b>Каналы</b>
-      <div class="row" style="margin-top:8px;">
-        <input id="newCh" placeholder="new-channel" maxlength="40"/>
-        <button id="addCh">+</button>
+    <!-- Channels -->
+    <div id="channelsCard" class="card hidden" style="margin-top:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <b>Каналы</b>
+        <button id="openAdminBtn" class="hidden">Админка</button>
       </div>
       <div class="list" id="channels"></div>
+      <div class="muted">В списке только доступные тебе каналы</div>
     </div>
 
-    <div class="card" style="margin-top:10px;">
-      <b>Личные</b>
-      <div class="row" style="margin-top:8px;">
-        <input id="dmPeer" placeholder="@username" maxlength="32"/>
-        <button id="openDm">↗</button>
+    <!-- Admin -->
+    <div id="adminCard" class="card hidden" style="margin-top:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <b>Админка</b>
+        <button id="closeAdminBtn">Закрыть</button>
       </div>
-      <div class="status muted">Открой DM по нику друга</div>
-      <div class="list" id="dms"></div>
+
+      <div class="tabs">
+        <div class="tab active" data-admin-tab="roles">Роли</div>
+        <div class="tab" data-admin-tab="users">Пользователи</div>
+        <div class="tab" data-admin-tab="channels">Каналы</div>
+        <div class="tab" data-admin-tab="audit">Аудит</div>
+      </div>
+
+      <div id="adminRoles">
+        <div class="muted">Кастомные роли (должности). Выдавай людям роли, потом привязывай их к каналам.</div>
+        <div class="row">
+          <input id="newRoleName" placeholder="role-slug (например manager-2)" />
+        </div>
+        <div class="row">
+          <input id="newRoleDisplay" placeholder="Отображаемое имя (например Менеджер)" />
+          <button id="createRoleBtn">Создать</button>
+        </div>
+        <div class="hr"></div>
+        <div id="rolesList" class="muted"></div>
+      </div>
+
+      <div id="adminUsers" class="hidden">
+        <div class="muted">Назначай людям кастомные роли.</div>
+        <div class="hr"></div>
+        <div id="usersList"></div>
+      </div>
+
+      <div id="adminChannels" class="hidden">
+        <div class="muted">Создай канал и задай доступ ролями и/или конкретными людьми. Публичный канал видят все.</div>
+        <div class="row">
+          <input id="newChannelName" placeholder="channel-name" />
+        </div>
+        <div class="row">
+          <select id="newChannelPublic">
+            <option value="true">Публичный (всем)</option>
+            <option value="false">Приватный (по доступу)</option>
+          </select>
+          <button id="createChannelBtn">Создать канал</button>
+        </div>
+        <div class="hr"></div>
+        <div class="muted">Настройка доступа: выбери канал, роли и пользователей.</div>
+        <div class="row">
+          <select id="accessChannel"></select>
+        </div>
+        <div class="grid2">
+          <div>
+            <div class="muted">Роли с доступом</div>
+            <div id="accessRoles"></div>
+          </div>
+          <div>
+            <div class="muted">Пользователи с доступом</div>
+            <div id="accessUsers"></div>
+          </div>
+        </div>
+        <div class="row">
+          <button id="saveAccessBtn">Сохранить доступ</button>
+        </div>
+        <div class="muted" id="accessMsg"></div>
+      </div>
+
+      <div id="adminAudit" class="hidden">
+        <div class="muted">Журнал действий (OWNER/SUPERADMIN). Просмотр DM через аудит добавим следующим шагом.</div>
+        <div class="hr"></div>
+        <div id="auditList" class="muted"></div>
+      </div>
     </div>
   </div>
 
   <div class="main">
-    <div class="card" style="display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
-      <div>
-        <div><b id="title"># general</b></div>
-        <div class="status" id="seen"></div>
-      </div>
-
-      <div style="display:flex; gap:8px; align-items:center;">
-        <input id="search" placeholder="Поиск…" style="max-width:260px;" />
-        <button id="toBottom" title="Вниз" style="display:none;">⬇️</button>
-      </div>
+    <div class="card">
+      <div><b id="title">—</b></div>
+      <div class="muted" id="hint">Сначала войди/зарегистрируйся</div>
     </div>
-
-    <div class="status" id="typing" style="height:18px; margin-top:8px; opacity:.75;"></div>
 
     <div id="log"></div>
 
     <div class="row">
-      <input id="text" placeholder="Написать сообщение…" maxlength="2000" />
-      <button id="send">Отправить</button>
+      <input id="text" placeholder="Написать сообщение…" maxlength="2000" disabled />
+      <button id="send" disabled>Отправить</button>
     </div>
   </div>
 </div>
 
 <script>
+  // Elements
+  const statusEl = document.getElementById("status");
+  const authBox = document.getElementById("authBox");
+  const meBox = document.getElementById("meBox");
+  const meNameEl = document.getElementById("meName");
+  const meEmailEl = document.getElementById("meEmail");
+  const meRoleEl = document.getElementById("meRole");
+
+  const logoutBtn = document.getElementById("logoutBtn");
+
+  const tabLogin = document.getElementById("tabLogin");
+  const tabRegister = document.getElementById("tabRegister");
+  const loginForm = document.getElementById("loginForm");
+  const registerForm = document.getElementById("registerForm");
+
+  const loginEmail = document.getElementById("loginEmail");
+  const loginPass = document.getElementById("loginPass");
+  const loginBtn = document.getElementById("loginBtn");
+  const loginMsg = document.getElementById("loginMsg");
+
+  const regName = document.getElementById("regName");
+  const regEmail = document.getElementById("regEmail");
+  const regPass = document.getElementById("regPass");
+  const regPosition = document.getElementById("regPosition");
+  const registerBtn = document.getElementById("registerBtn");
+  const registerMsg = document.getElementById("registerMsg");
+
+  const channelsCard = document.getElementById("channelsCard");
+  const channelsEl = document.getElementById("channels");
+  const titleEl = document.getElementById("title");
+  const hintEl = document.getElementById("hint");
+
   const log = document.getElementById("log");
   const text = document.getElementById("text");
   const sendBtn = document.getElementById("send");
-  const nameInp = document.getElementById("name");
-  const saveNameBtn = document.getElementById("saveName");
-  const presenceEl = document.getElementById("presence");
-  const seenEl = document.getElementById("seen");
-  const titleEl = document.getElementById("title");
-  const channelsEl = document.getElementById("channels");
-  const newChInp = document.getElementById("newCh");
-  const addChBtn = document.getElementById("addCh");
-  const searchInp = document.getElementById("search");
-  const toBottomBtn = document.getElementById("toBottom");
-  const typingEl = document.getElementById("typing");
 
-  const dmsEl = document.getElementById("dms");
-  const dmPeerInp = document.getElementById("dmPeer");
-  const openDmBtn = document.getElementById("openDm");
+  const openAdminBtn = document.getElementById("openAdminBtn");
+  const adminCard = document.getElementById("adminCard");
+  const closeAdminBtn = document.getElementById("closeAdminBtn");
 
-  let myName = localStorage.getItem("miniChatName") || "";
-  if (myName) nameInp.value = myName;
+  // Admin elements
+  const rolesList = document.getElementById("rolesList");
+  const usersList = document.getElementById("usersList");
+  const auditList = document.getElementById("auditList");
 
-  // view: {kind:'channel', channel} or {kind:'dm', chatId, peer}
-  let view = { kind: "channel", channel: localStorage.getItem("miniChatLastChannel") || "general" };
+  const newRoleName = document.getElementById("newRoleName");
+  const newRoleDisplay = document.getElementById("newRoleDisplay");
+  const createRoleBtn = document.getElementById("createRoleBtn");
 
-  let channelsCache = []; // [{name,lastId,readId,unread}]
-  let dmsCache = [];      // [{chatId,peer,lastId,readId,unread}]
-  let messagesCache = [];
-  let lastDateLabel = "";
-  let lastSeq = 0;        // last message id in current view (channel message id or dm message id)
-  let currentDMChatId = null;
+  const newChannelName = document.getElementById("newChannelName");
+  const newChannelPublic = document.getElementById("newChannelPublic");
+  const createChannelBtn = document.getElementById("createChannelBtn");
 
-  const wsProto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${wsProto}://${location.host}`);
+  const accessChannel = document.getElementById("accessChannel");
+  const accessRoles = document.getElementById("accessRoles");
+  const accessUsers = document.getElementById("accessUsers");
+  const saveAccessBtn = document.getElementById("saveAccessBtn");
+  const accessMsg = document.getElementById("accessMsg");
 
-  presenceEl.textContent = "Подключение…";
-  ws.addEventListener("open", () => presenceEl.textContent = "✅ Подключено");
-  ws.addEventListener("close", () => presenceEl.textContent = "⚠️ Соединение закрыто (обнови страницу)");
-  ws.addEventListener("error", () => presenceEl.textContent = "❌ Ошибка WebSocket");
+  const adminTabs = [...document.querySelectorAll("[data-admin-tab]")];
+  const adminViews = {
+    roles: document.getElementById("adminRoles"),
+    users: document.getElementById("adminUsers"),
+    channels: document.getElementById("adminChannels"),
+    audit: document.getElementById("adminAudit"),
+  };
 
-  function escapeHtml(s) {
-    return String(s || "").replace(/[&<>"']/g, c => ({
-      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
-    }[c]));
+  // State
+  let me = null;
+  let ws = null;
+  let channels = []; // [{id,name,isPublic}]
+  let activeChannelId = null;
+  let activeChannelName = "";
+  let roles = []; // admin list
+  let users = []; // admin list
+
+  function esc(s) {
+    return String(s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
   }
 
-  function fmtBadge(n) {
-    if (n <= 0) return "";
-    if (n > 99) return "99+";
-    return String(n);
+  async function api(path, opts) {
+    const res = await fetch(path, { credentials: "include", ...opts });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.message || data.code || "Request failed");
+    }
+    return data;
   }
 
-  function setTitle() {
-    if (view.kind === "channel") {
-      titleEl.textContent = `# ${view.channel}`;
-      localStorage.setItem("miniChatLastChannel", view.channel);
-      seenEl.style.display = "";
+  function setAuthMode(mode) {
+    if (mode === "login") {
+      tabLogin.classList.add("active");
+      tabRegister.classList.remove("active");
+      loginForm.classList.remove("hidden");
+      registerForm.classList.add("hidden");
     } else {
-      titleEl.textContent = `@ ${view.peer}`;
-      seenEl.style.display = "none"; // пока убираем “прочитано всеми” в DM
+      tabRegister.classList.add("active");
+      tabLogin.classList.remove("active");
+      registerForm.classList.remove("hidden");
+      loginForm.classList.add("hidden");
     }
   }
 
-  function clearThread() {
-    searchInp.value = "";
-    typingEl.textContent = "";
-    messagesCache = [];
-    lastDateLabel = "";
+  tabLogin.onclick = () => setAuthMode("login");
+  tabRegister.onclick = () => setAuthMode("register");
+
+  function uiLoggedOut() {
+    me = null;
+    authBox.classList.remove("hidden");
+    meBox.classList.add("hidden");
+    logoutBtn.classList.add("hidden");
+    channelsCard.classList.add("hidden");
+    adminCard.classList.add("hidden");
+    openAdminBtn.classList.add("hidden");
+    titleEl.textContent = "—";
+    hintEl.textContent = "Сначала войди/зарегистрируйся";
+    text.disabled = true;
+    sendBtn.disabled = true;
     log.innerHTML = "";
-    lastSeq = 0;
-    currentDMChatId = null;
+    if (ws) { try { ws.close(); } catch {} }
+    ws = null;
   }
 
-  // ===== Lists render =====
-  function renderChannels() {
-    channelsEl.innerHTML = "";
-    for (const ch of channelsCache) {
-      const row = document.createElement("div");
-      row.className = "item" + (view.kind === "channel" && ch.name === view.channel ? " active" : "");
+  function uiLoggedIn() {
+    authBox.classList.add("hidden");
+    meBox.classList.remove("hidden");
+    logoutBtn.classList.remove("hidden");
+    channelsCard.classList.remove("hidden");
+    hintEl.textContent = "Выбери канал слева";
+    text.disabled = false;
+    sendBtn.disabled = false;
 
-      const left = document.createElement("div");
-      left.textContent = "# " + ch.name;
+    meNameEl.textContent = me.displayName;
+    meEmailEl.textContent = me.email;
+    meRoleEl.textContent = me.systemRole;
 
-      const right = document.createElement("div");
-      if (!(view.kind === "channel" && ch.name === view.channel) && ch.unread > 0) {
-        const b = document.createElement("span");
-        b.className = "badge";
-        b.textContent = fmtBadge(ch.unread);
-        right.appendChild(b);
-      }
+    const canAdmin = (me.systemRole === "OWNER" || me.systemRole === "ADMIN" || me.isSuperadmin);
+    openAdminBtn.classList.toggle("hidden", !canAdmin);
+  }
 
-      row.appendChild(left);
-      row.appendChild(right);
+  logoutBtn.onclick = async () => {
+    try { await api("/api/logout", { method: "POST" }); } catch {}
+    uiLoggedOut();
+    statusEl.textContent = "Вышел";
+  };
 
-      row.onclick = () => {
-        view = { kind: "channel", channel: ch.name };
-        setTitle();
-        clearThread();
-        ws.send(JSON.stringify({ type: "join", channel: ch.name }));
-        renderChannels();
-        renderDMs();
-      };
-
-      channelsEl.appendChild(row);
+  async function loadPositions() {
+    const data = await api("/api/positions");
+    regPosition.innerHTML = "";
+    for (const p of data.positions) {
+      const opt = document.createElement("option");
+      opt.value = String(p.id);
+      opt.textContent = p.displayName;
+      regPosition.appendChild(opt);
     }
   }
 
-  function renderDMs() {
-    dmsEl.innerHTML = "";
-    if (!dmsCache.length) {
-      const empty = document.createElement("div");
-      empty.className = "status muted";
-      empty.textContent = "Пока нет диалогов";
-      dmsEl.appendChild(empty);
-      return;
+  loginBtn.onclick = async () => {
+    loginMsg.textContent = "";
+    loginBtn.disabled = true;
+    try {
+      const data = await api("/api/login", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ email: loginEmail.value, password: loginPass.value })
+      });
+      me = data.me;
+      statusEl.textContent = "Вошёл";
+      uiLoggedIn();
+      await initWs();
+    } catch (e) {
+      loginMsg.textContent = String(e.message || e);
+    } finally {
+      loginBtn.disabled = false;
     }
+  };
 
-    for (const dm of dmsCache) {
-      const row = document.createElement("div");
-      row.className = "item" + (view.kind === "dm" && dm.chatId === view.chatId ? " active" : "");
-
-      const left = document.createElement("div");
-      left.textContent = "👤 " + dm.peer;
-
-      const right = document.createElement("div");
-      if (!(view.kind === "dm" && dm.chatId === view.chatId) && dm.unread > 0) {
-        const b = document.createElement("span");
-        b.className = "badge";
-        b.textContent = fmtBadge(dm.unread);
-        right.appendChild(b);
-      }
-
-      row.appendChild(left);
-      row.appendChild(right);
-
-      row.onclick = () => openDM(dm.peer);
-
-      dmsEl.appendChild(row);
+  registerBtn.onclick = async () => {
+    registerMsg.textContent = "";
+    registerBtn.disabled = true;
+    try {
+      const data = await api("/api/register", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({
+          displayName: regName.value,
+          email: regEmail.value,
+          password: regPass.value,
+          positionRoleId: Number(regPosition.value)
+        })
+      });
+      me = data.me;
+      statusEl.textContent = "Зарегистрирован";
+      uiLoggedIn();
+      await initWs();
+    } catch (e) {
+      registerMsg.textContent = String(e.message || e);
+    } finally {
+      registerBtn.disabled = false;
     }
-  }
+  };
 
-  function openDM(peerRaw) {
-    const peer = (peerRaw || "").trim().replace(/^@/, "").slice(0, 32);
-    if (!peer) return;
-
-    view = { kind: "dm", peer, chatId: null };
-    setTitle();
-    clearThread();
-    ws.send(JSON.stringify({ type: "open_dm", peer }));
-    renderChannels();
-    renderDMs();
-  }
-
-  openDmBtn.addEventListener("click", () => openDM(dmPeerInp.value));
-  dmPeerInp.addEventListener("keydown", (e) => { if (e.key === "Enter") openDM(dmPeerInp.value); });
-
-  // ===== Thread UI goodies =====
-  function dateLabel(ts) {
-    const d = new Date(ts);
-    const today = new Date();
-    const yd = new Date(Date.now() - 86400000);
-    const dd = d.toDateString();
-    if (dd === today.toDateString()) return "Сегодня";
-    if (dd === yd.toDateString()) return "Вчера";
-    return d.toLocaleDateString();
-  }
-
-  function addDateDivider(ts) {
-    const label = dateLabel(ts);
-    if (label === lastDateLabel) return;
-    lastDateLabel = label;
-
-    const div = document.createElement("div");
-    div.style.margin = "14px 0";
-    div.style.display = "flex";
-    div.style.alignItems = "center";
-    div.style.gap = "10px";
-    div.innerHTML = `
-      <div style="height:1px; background:#1f2a44; flex:1;"></div>
-      <div style="font-size:12px; opacity:.7;">${escapeHtml(label)}</div>
-      <div style="height:1px; background:#1f2a44; flex:1;"></div>
-    `;
-    log.appendChild(div);
-  }
-
-  function highlight(textValue, q) {
-    const t = escapeHtml(textValue || "");
-    if (!q) return t;
-    const idx = t.toLowerCase().indexOf(q.toLowerCase());
-    if (idx < 0) return t;
-    return t.slice(0, idx) + "<mark>" + t.slice(idx, idx + q.length) + "</mark>" + t.slice(idx + q.length);
-  }
-
-  function addMessage(m) {
-    addDateDivider(m.at);
-
+  function addMsg(m) {
     const div = document.createElement("div");
     div.className = "msg";
     const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    const q = (searchInp.value || "").trim();
-
     div.innerHTML = `
-      <div class="meta">
-        <span>${escapeHtml(m.from)} • ${at}</span>
-        <button class="copyBtn" title="Скопировать" style="padding:6px 8px; font-size:12px;">📋</button>
-      </div>
-      <div class="bubble">${highlight(m.text || "", q)}</div>
+      <div class="meta"><span>${esc(m.from)} • ${at}</span></div>
+      <div class="bubble">${esc(m.text)}</div>
     `;
-
-    div.querySelector(".copyBtn").onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(m.text || "");
-        const btn = div.querySelector(".copyBtn");
-        const old = btn.textContent;
-        btn.textContent = "✅";
-        setTimeout(() => (btn.textContent = old), 700);
-      } catch {
-        alert("Не удалось скопировать");
-      }
-    };
-
     log.appendChild(div);
-  }
-
-  function renderFromCache() {
-    log.innerHTML = "";
-    lastDateLabel = "";
-
-    const q = (searchInp.value || "").trim().toLowerCase();
-    const list = q
-      ? messagesCache.filter(m => (m.text || "").toLowerCase().includes(q))
-      : messagesCache;
-
-    for (const m of list) addMessage(m);
     log.scrollTop = log.scrollHeight;
   }
 
-  searchInp.addEventListener("input", renderFromCache);
-
-  // Ctrl+Y search, Esc clear
-  document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
-      e.preventDefault();
-      searchInp.focus();
-    }
-    if (e.key === "Escape") {
-      if (document.activeElement === searchInp || (searchInp.value || "").trim()) {
-        searchInp.value = "";
-        renderFromCache();
-        text.focus();
-      }
-    }
-  });
-
-  let typingTimer = null;
-  text.addEventListener("input", () => {
-    typingEl.textContent = "Ты печатаешь…";
-    clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => (typingEl.textContent = ""), 600);
-  });
-
-  function nearBottom() {
-    return (log.scrollHeight - log.scrollTop - log.clientHeight) < 120;
-  }
-
-  log.addEventListener("scroll", () => {
-    toBottomBtn.style.display = nearBottom() ? "none" : "inline-block";
-  });
-  toBottomBtn.addEventListener("click", () => { log.scrollTop = log.scrollHeight; });
-
-  // ===== Seen sending (channel / dm) =====
-  function sendSeenCurrent() {
-    if (ws.readyState !== 1 || lastSeq <= 0) return;
-
-    if (view.kind === "channel") {
-      ws.send(JSON.stringify({ type: "seen", seq: lastSeq }));
-    } else if (view.kind === "dm" && currentDMChatId) {
-      ws.send(JSON.stringify({ type: "dm_seen", chatId: currentDMChatId, seq: lastSeq }));
+  function renderChannels() {
+    channelsEl.innerHTML = "";
+    for (const ch of channels) {
+      const el = document.createElement("div");
+      el.className = "item" + (ch.id === activeChannelId ? " active" : "");
+      el.textContent = "#" + ch.name + (ch.isPublic ? "" : " 🔒");
+      el.onclick = () => joinChannel(ch.id, ch.name);
+      channelsEl.appendChild(el);
     }
   }
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") sendSeenCurrent();
-  });
-
-  // ===== Send message (channel or dm) =====
-  function sendMsg() {
-    const v = text.value.trim();
-    if (!v) return;
-
-    if (view.kind === "channel") {
-      ws.send(JSON.stringify({ type: "chat", text: v }));
-    } else {
-      if (!currentDMChatId) return;
-      ws.send(JSON.stringify({ type: "dm_send", chatId: currentDMChatId, text: v }));
+  async function joinChannel(id, name) {
+    activeChannelId = id;
+    activeChannelName = name;
+    titleEl.textContent = "#" + name;
+    hintEl.textContent = "";
+    log.innerHTML = "";
+    renderChannels();
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "join", channelId: id }));
     }
+  }
 
+  sendBtn.onclick = () => sendMessage();
+  text.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMessage(); });
+
+  function sendMessage() {
+    const t = text.value.trim();
+    if (!t) return;
+    if (!ws || ws.readyState !== 1 || !activeChannelId) return;
+    ws.send(JSON.stringify({ type: "chat", text: t }));
     text.value = "";
     text.focus();
   }
 
-  sendBtn.addEventListener("click", sendMsg);
-  text.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
+  async function initWs() {
+    if (ws) { try { ws.close(); } catch {} }
+    const wsProto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${wsProto}://${location.host}`);
 
-  function saveName() {
-    myName = nameInp.value.trim().slice(0, 32) || "Гость";
-    localStorage.setItem("miniChatName", myName);
-    if (ws.readyState === 1) ws.send(JSON.stringify({ type: "hello", name: myName }));
-  }
-  saveNameBtn.addEventListener("click", saveName);
+    ws.addEventListener("open", () => {
+      statusEl.textContent = "✅ WebSocket подключен";
+    });
 
-  addChBtn.addEventListener("click", () => {
-    const name = newChInp.value.trim();
-    if (!name) return;
-    ws.send(JSON.stringify({ type: "create_channel", name }));
-    newChInp.value = "";
-  });
+    ws.addEventListener("close", () => {
+      statusEl.textContent = "⚠️ WebSocket отключен";
+    });
 
-  // ===== WS handlers =====
-  ws.addEventListener("open", () => {
-    if (myName) ws.send(JSON.stringify({ type: "hello", name: myName }));
-    setTitle();
+    ws.addEventListener("message", (ev) => {
+      const msg = JSON.parse(ev.data);
 
-    // при старте сразу зайдём в сохранённый канал
-    if (view.kind === "channel" && view.channel && view.channel !== "general") {
-      ws.send(JSON.stringify({ type: "join", channel: view.channel }));
-    }
-  });
+      if (msg.type === "init") {
+        me = msg.me;
+        channels = msg.channels || [];
+        renderChannels();
 
-  ws.addEventListener("message", (ev) => {
-    const msg = JSON.parse(ev.data);
-
-    if (msg.type === "channels_state") {
-      channelsCache = msg.channels || [];
-      // если текущий канал исчез
-      if (view.kind === "channel" && channelsCache.length && !channelsCache.some(c => c.name === view.channel)) {
-        view.channel = channelsCache[0].name;
-        setTitle();
-        ws.send(JSON.stringify({ type: "join", channel: view.channel }));
-      }
-      renderChannels();
-      return;
-    }
-
-    if (msg.type === "dms_state") {
-      dmsCache = msg.dms || [];
-      renderDMs();
-      return;
-    }
-
-    if (msg.type === "joined") {
-      view = { kind: "channel", channel: msg.channel };
-      setTitle();
-      renderChannels();
-      renderDMs();
-      return;
-    }
-
-    if (msg.type === "history") {
-      if (view.kind !== "channel" || msg.channel !== view.channel) return;
-
-      messagesCache = (msg.messages || []);
-      lastSeq = 0;
-      for (const m of messagesCache) lastSeq = Math.max(lastSeq, m.id);
-
-      renderFromCache();
-      sendSeenCurrent();
-      return;
-    }
-
-    if (msg.type === "chat") {
-      if (view.kind !== "channel" || msg.channel !== view.channel) return;
-
-      messagesCache.push(msg.message);
-      lastSeq = Math.max(lastSeq, msg.message.id);
-
-      if ((searchInp.value || "").trim()) renderFromCache();
-      else {
-        addMessage(msg.message);
-        if (nearBottom()) log.scrollTop = log.scrollHeight;
-      }
-
-      sendSeenCurrent();
-      return;
-    }
-
-    if (msg.type === "seen_state") {
-      if (view.kind !== "channel" || msg.channel !== view.channel) return;
-
-      if (msg.lastSeq === 0) seenEl.textContent = "";
-      else {
-        const allRead = (msg.readUpTo >= msg.lastSeq);
-        seenEl.textContent = allRead
-          ? `✅ Прочитано всеми (онлайн: ${msg.connected})`
-          : `⌛ Прочитано до #${msg.readUpTo} из #${msg.lastSeq} (онлайн: ${msg.connected})`;
-      }
-      return;
-    }
-
-    if (msg.type === "dm_joined") {
-      // мы в DM
-      view = { kind: "dm", peer: msg.peer, chatId: Number(msg.chatId) };
-      currentDMChatId = Number(msg.chatId);
-      setTitle();
-
-      messagesCache = msg.messages || [];
-      lastSeq = 0;
-      for (const m of messagesCache) lastSeq = Math.max(lastSeq, m.id);
-
-      renderFromCache();
-      renderChannels();
-      renderDMs();
-
-      sendSeenCurrent();
-      return;
-    }
-
-    if (msg.type === "dm_message") {
-      // msg.peer — это собеседник именно для этой вкладки
-      const chatId = Number(msg.chatId);
-      const peer = msg.peer;
-
-      // если мы сейчас в этом DM — показываем в ленте
-      if (view.kind === "dm" && currentDMChatId === chatId) {
-        messagesCache.push(msg.message);
-        lastSeq = Math.max(lastSeq, msg.message.id);
-
-        if ((searchInp.value || "").trim()) renderFromCache();
-        else {
-          addMessage(msg.message);
-          if (nearBottom()) log.scrollTop = log.scrollHeight;
+        // auto join first channel
+        if (channels.length) {
+          joinChannel(channels[0].id, channels[0].name);
+        } else {
+          titleEl.textContent = "Нет доступных каналов";
+          hintEl.textContent = "Попроси администратора выдать доступ";
         }
-
-        sendSeenCurrent();
-      } else {
-        // иначе просто обновятся бейджи (придёт dms_state)
+        return;
       }
 
-      return;
+      if (msg.type === "joined") {
+        return;
+      }
+
+      if (msg.type === "history") {
+        if (msg.channelId !== activeChannelId) return;
+        for (const m of (msg.messages || [])) addMsg(m);
+        return;
+      }
+
+      if (msg.type === "chat") {
+        if (msg.channelId !== activeChannelId) return;
+        addMsg(msg.message);
+        return;
+      }
+
+      if (msg.type === "error") {
+        alert(msg.message || msg.code || "Error");
+        return;
+      }
+    });
+  }
+
+  // Admin UI
+  function setAdminTab(tab) {
+    for (const t of adminTabs) {
+      t.classList.toggle("active", t.dataset.adminTab === tab);
     }
-  });
+    for (const k of Object.keys(adminViews)) {
+      adminViews[k].classList.toggle("hidden", k !== tab);
+    }
+  }
+  adminTabs.forEach(t => t.onclick = () => setAdminTab(t.dataset.adminTab));
+
+  openAdminBtn.onclick = async () => {
+    adminCard.classList.remove("hidden");
+    await refreshAdmin();
+  };
+  closeAdminBtn.onclick = () => adminCard.classList.add("hidden");
+
+  async function refreshAdmin() {
+    // roles
+    const r = await api("/api/admin/roles");
+    roles = r.roles || [];
+    rolesList.innerHTML = roles.map(x => `<div><code>${esc(x.name)}</code> — ${esc(x.displayName)} (id:${x.id})</div>`).join("");
+
+    // users
+    const u = await api("/api/admin/users");
+    users = u.users || [];
+    usersList.innerHTML = users.map(us => `
+      <div class="card" style="margin-top:10px;">
+        <div><b>${esc(us.displayName)}</b> <span class="pill">${esc(us.systemRole)}</span></div>
+        <div class="muted">${esc(us.email)}</div>
+        <div class="row">
+          <select data-user-role-select="${us.id}">
+            <option value="">Выдать роль…</option>
+            ${roles.map(r => `<option value="${r.id}">${esc(r.displayName)}</option>`).join("")}
+          </select>
+          <button data-user-role-btn="${us.id}">Выдать</button>
+        </div>
+      </div>
+    `).join("");
+
+    for (const us of users) {
+      const btn = document.querySelector(`[data-user-role-btn="${us.id}"]`);
+      const sel = document.querySelector(`[data-user-role-select="${us.id}"]`);
+      btn.onclick = async () => {
+        const roleId = Number(sel.value || 0);
+        if (!roleId) return;
+        await api(`/api/admin/users/${us.id}/roles`, {
+          method: "POST",
+          headers: { "Content-Type":"application/json" },
+          body: JSON.stringify({ roleId })
+        });
+        alert("Роль выдана");
+      };
+    }
+
+    // channels list for access
+    const ch = await api("/api/channels");
+    // NOTE: /api/channels returns only accessible channels for current admin
+    // For OWNER/SUPERADMIN it will be all channels.
+    const list = ch.channels || [];
+    accessChannel.innerHTML = list.map(c => `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`).join("");
+
+    renderAccessPickers();
+
+    // audit (owner only)
+    try {
+      const a = await api("/api/audit");
+      auditList.innerHTML = (a.logs || []).map(l => `
+        <div class="card" style="margin-top:10px;">
+          <div><b>${esc(l.action)}</b> <span class="muted">${esc(new Date(l.at).toLocaleString())}</span></div>
+          <div class="muted">actor: ${esc(l.actor.displayName)} (${esc(l.actor.email)})</div>
+          <div class="muted"><code>${esc(JSON.stringify(l.meta))}</code></div>
+        </div>
+      `).join("");
+    } catch {
+      auditList.innerHTML = `<div class="muted">Аудит доступен только OWNER/SUPERADMIN</div>`;
+    }
+  }
+
+  function renderAccessPickers() {
+    accessRoles.innerHTML = roles.map(r => `
+      <label class="muted" style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+        <input type="checkbox" data-access-role="${r.id}" />
+        ${esc(r.displayName)}
+      </label>
+    `).join("");
+
+    accessUsers.innerHTML = users.map(u => `
+      <label class="muted" style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+        <input type="checkbox" data-access-user="${u.id}" />
+        ${esc(u.displayName)} <span class="muted">(${esc(u.email)})</span>
+      </label>
+    `).join("");
+  }
+
+  createRoleBtn.onclick = async () => {
+    createRoleBtn.disabled = true;
+    try {
+      await api("/api/admin/roles", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ name: newRoleName.value, displayName: newRoleDisplay.value })
+      });
+      newRoleName.value = "";
+      newRoleDisplay.value = "";
+      await refreshAdmin();
+      alert("Роль создана");
+    } catch (e) {
+      alert(String(e.message || e));
+    } finally {
+      createRoleBtn.disabled = false;
+    }
+  };
+
+  createChannelBtn.onclick = async () => {
+    createChannelBtn.disabled = true;
+    try {
+      await api("/api/admin/channels", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({
+          name: newChannelName.value,
+          isPublic: newChannelPublic.value === "true"
+        })
+      });
+      newChannelName.value = "";
+      await refreshAdmin();
+      alert("Канал создан");
+    } catch (e) {
+      alert(String(e.message || e));
+    } finally {
+      createChannelBtn.disabled = false;
+    }
+  };
+
+  saveAccessBtn.onclick = async () => {
+    accessMsg.textContent = "";
+    saveAccessBtn.disabled = true;
+    try {
+      const channelId = Number(accessChannel.value || 0);
+      const roleIds = [...document.querySelectorAll("[data-access-role]")].filter(x => x.checked).map(x => Number(x.dataset.accessRole));
+      const userIds = [...document.querySelectorAll("[data-access-user]")].filter(x => x.checked).map(x => Number(x.dataset.accessUser));
+
+      await api(`/api/admin/channels/${channelId}/access`, {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ roleIds, userIds })
+      });
+      accessMsg.textContent = "✅ Доступ сохранён";
+      // after access change, refresh ws init by reloading page (fast MVP)
+      setTimeout(() => location.reload(), 600);
+    } catch (e) {
+      accessMsg.textContent = "❌ " + String(e.message || e);
+    } finally {
+      saveAccessBtn.disabled = false;
+    }
+  };
+
+  // Boot
+  (async () => {
+    try {
+      await loadPositions();
+      // check session
+      const meResp = await api("/api/me");
+      me = meResp.me;
+      statusEl.textContent = "Сессия активна";
+      uiLoggedIn();
+      await initWs();
+    } catch {
+      statusEl.textContent = "Нужно войти";
+      uiLoggedOut();
+      setAuthMode("login");
+    }
+  })();
 </script>
 </body>
 </html>
-
