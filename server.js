@@ -57,9 +57,10 @@ async function queryOne(sql, params) {
 }
 
 /* =========================
-   Online presence
+   Online presence + sockets map
 ========================= */
 const onlineCounts = new Map(); // userId -> count
+const userSockets = new Map();  // userId -> Set<ws>
 
 function setOnline(userId, delta) {
   const cur = onlineCounts.get(userId) || 0;
@@ -67,6 +68,30 @@ function setOnline(userId, delta) {
   if (next === 0) onlineCounts.delete(userId);
   else onlineCounts.set(userId, next);
   return { was: cur > 0, now: next > 0 };
+}
+
+function addSocket(userId, ws) {
+  let set = userSockets.get(userId);
+  if (!set) {
+    set = new Set();
+    userSockets.set(userId, set);
+  }
+  set.add(ws);
+}
+function removeSocket(userId, ws) {
+  const set = userSockets.get(userId);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) userSockets.delete(userId);
+}
+
+function sendToUser(userId, obj) {
+  const set = userSockets.get(userId);
+  if (!set) return;
+  const payload = JSON.stringify(obj);
+  for (const ws of set) {
+    if (ws.readyState === 1) ws.send(payload);
+  }
 }
 
 function broadcastAll(obj) {
@@ -138,7 +163,7 @@ function requireOwner(req, res, next) {
 }
 
 /* =========================
-   Roles & Access
+   Roles & Access (channels)
 ========================= */
 async function getUserCustomRoleIds(userId) {
   const { rows } = await pool.query(
@@ -171,34 +196,99 @@ async function canAccessChannel(user, channelId) {
   return Boolean(racc);
 }
 
-async function listAccessibleChannels(user) {
+/**
+ * Возвращает каналы + lastMessageId + unreadCount для конкретного пользователя.
+ * unreadCount = сколько сообщений в канале с id > last_read_message_id (для этого пользователя)
+ */
+async function listAccessibleChannelsWithUnread(user) {
   if (user.isSuperadmin || user.systemRole === "OWNER") {
     const { rows } = await pool.query(
-      `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
+      `
+      SELECT
+        c.id, c.name, c.is_public,
+        COALESCE(lm.last_id, 0)::bigint AS last_message_id,
+        COALESCE(cr.last_read_message_id, 0)::bigint AS last_read_message_id,
+        COALESCE(uc.unread_count, 0)::int AS unread_count
+      FROM channels c
+      LEFT JOIN LATERAL (
+        SELECT id AS last_id
+        FROM channel_messages m
+        WHERE m.channel_id = c.id
+        ORDER BY id DESC
+        LIMIT 1
+      ) lm ON true
+      LEFT JOIN channel_reads cr
+        ON cr.channel_id = c.id AND cr.user_id = $1
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS unread_count
+        FROM channel_messages m
+        WHERE m.channel_id = c.id
+          AND m.id > COALESCE(cr.last_read_message_id, 0)
+      ) uc ON true
+      ORDER BY c.name ASC
+      LIMIT 200
+      `,
+      [user.id]
     );
-    return rows.map((r) => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
+
+    return rows.map((r) => ({
+      id: Number(r.id),
+      name: r.name,
+      isPublic: r.is_public,
+      lastMessageId: Number(r.last_message_id),
+      unreadCount: Number(r.unread_count),
+    }));
   }
 
   const roleIds = await getUserCustomRoleIds(user.id);
 
   const { rows } = await pool.query(
     `
-    SELECT DISTINCT c.id, c.name, c.is_public
-    FROM channels c
-    LEFT JOIN channel_user_access cua
-      ON cua.channel_id = c.id AND cua.user_id = $1
-    LEFT JOIN channel_role_access cra
-      ON cra.channel_id = c.id AND (cra.role_id = ANY($2::int[]) OR $2::int[] IS NULL)
-    WHERE c.is_public = true
-       OR cua.user_id IS NOT NULL
-       OR cra.role_id IS NOT NULL
-    ORDER BY c.name ASC
+    WITH accessible AS (
+      SELECT DISTINCT c.id, c.name, c.is_public
+      FROM channels c
+      LEFT JOIN channel_user_access cua
+        ON cua.channel_id = c.id AND cua.user_id = $1
+      LEFT JOIN channel_role_access cra
+        ON cra.channel_id = c.id AND (cra.role_id = ANY($2::int[]) OR $2::int[] IS NULL)
+      WHERE c.is_public = true
+         OR cua.user_id IS NOT NULL
+         OR cra.role_id IS NOT NULL
+    )
+    SELECT
+      a.id, a.name, a.is_public,
+      COALESCE(lm.last_id, 0)::bigint AS last_message_id,
+      COALESCE(cr.last_read_message_id, 0)::bigint AS last_read_message_id,
+      COALESCE(uc.unread_count, 0)::int AS unread_count
+    FROM accessible a
+    LEFT JOIN LATERAL (
+      SELECT id AS last_id
+      FROM channel_messages m
+      WHERE m.channel_id = a.id
+      ORDER BY id DESC
+      LIMIT 1
+    ) lm ON true
+    LEFT JOIN channel_reads cr
+      ON cr.channel_id = a.id AND cr.user_id = $1
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS unread_count
+      FROM channel_messages m
+      WHERE m.channel_id = a.id
+        AND m.id > COALESCE(cr.last_read_message_id, 0)
+    ) uc ON true
+    ORDER BY a.name ASC
     LIMIT 200
     `,
     [user.id, roleIds.length ? roleIds : null]
   );
 
-  return rows.map((r) => ({ id: Number(r.id), name: r.name, isPublic: r.is_public }));
+  return rows.map((r) => ({
+    id: Number(r.id),
+    name: r.name,
+    isPublic: r.is_public,
+    lastMessageId: Number(r.last_message_id),
+    unreadCount: Number(r.unread_count),
+  }));
 }
 
 async function auditLog(actorUserId, action, metaObj) {
@@ -210,7 +300,7 @@ async function auditLog(actorUserId, action, metaObj) {
 }
 
 /* =========================
-   Reads: eligible + progress
+   Read receipts (channels, вариант Б)
 ========================= */
 async function getSuperadminUserIdOrNull() {
   if (!SUPERADMIN_EMAIL) return null;
@@ -225,7 +315,6 @@ async function getEligibleUserIdsForChannel(channelId) {
   const superId = await getSuperadminUserIdOrNull();
 
   if (ch.is_public) {
-    // all users + owner(s) + superadmin (already in users but keep union safe)
     const { rows } = await pool.query(`SELECT id FROM users ORDER BY id ASC`);
     const ids = new Set(rows.map(r => Number(r.id)));
     const ownerRows = await pool.query(`SELECT id FROM users WHERE system_role='OWNER'`);
@@ -234,7 +323,6 @@ async function getEligibleUserIdsForChannel(channelId) {
     return [...ids];
   }
 
-  // private: explicit users + role-based users + owner + superadmin
   const { rows } = await pool.query(
     `
     WITH role_users AS (
@@ -267,29 +355,13 @@ async function getEligibleUserIdsForChannel(channelId) {
   return rows.map(r => Number(r.id));
 }
 
-function computeReadCountsForMessages(messages, eligibleIds, lastReadByUser) {
-  // messages sorted ASC by id
-  const total = eligibleIds.length;
-  for (const m of messages) {
-    let readCount = 0;
-    for (const uid of eligibleIds) {
-      const last = lastReadByUser.get(uid) || 0;
-      if (last >= m.id) readCount += 1;
-    }
-    m.read = { readCount, total };
-  }
-  return messages;
-}
-
 async function getReadProgressForMessage(channelId, messageId) {
   const eligibleIds = await getEligibleUserIdsForChannel(channelId);
   if (!eligibleIds.length) return { readCount: 0, total: 0 };
 
   const { rows } = await pool.query(
     `
-    WITH eligible AS (
-      SELECT unnest($2::int[]) AS user_id
-    )
+    WITH eligible AS (SELECT unnest($2::int[]) AS user_id)
     SELECT
       COUNT(*) FILTER (WHERE cr.last_read_message_id >= $3)::int AS read_count,
       COUNT(*)::int AS total
@@ -317,6 +389,130 @@ async function upsertChannelRead(channelId, userId, lastReadMessageId) {
 }
 
 /* =========================
+   DM (личные сообщения) + unread
+========================= */
+async function ensureDmChat(userAId, userBId) {
+  const a = Math.min(userAId, userBId);
+  const b = Math.max(userAId, userBId);
+
+  const existing = await queryOne(
+    `SELECT id FROM dm_chats WHERE user_a_id=$1 AND user_b_id=$2`,
+    [a, b]
+  );
+  if (existing) return Number(existing.id);
+
+  const row = await queryOne(
+    `INSERT INTO dm_chats (user_a_id, user_b_id, created_at)
+     VALUES ($1,$2,NOW())
+     RETURNING id`,
+    [a, b]
+  );
+  return Number(row.id);
+}
+
+async function canAccessDmChat(userId, chatId) {
+  const row = await queryOne(
+    `SELECT 1 FROM dm_chats WHERE id=$1 AND (user_a_id=$2 OR user_b_id=$2)`,
+    [chatId, userId]
+  );
+  return Boolean(row);
+}
+
+async function getDmOtherUserId(chatId, meId) {
+  const row = await queryOne(
+    `SELECT user_a_id, user_b_id FROM dm_chats WHERE id=$1`,
+    [chatId]
+  );
+  if (!row) return null;
+  const a = Number(row.user_a_id);
+  const b = Number(row.user_b_id);
+  return a === meId ? b : a;
+}
+
+async function upsertDmRead(chatId, userId, lastReadMessageId) {
+  await pool.query(
+    `
+    INSERT INTO dm_reads (chat_id, user_id, last_read_message_id, updated_at)
+    VALUES ($1,$2,$3,NOW())
+    ON CONFLICT (chat_id, user_id)
+    DO UPDATE SET last_read_message_id = GREATEST(dm_reads.last_read_message_id, EXCLUDED.last_read_message_id),
+                  updated_at = NOW()
+    `,
+    [chatId, userId, lastReadMessageId]
+  );
+}
+
+async function getDmReadProgress(chatId, messageId) {
+  const { rows } = await pool.query(
+    `
+    WITH participants AS (
+      SELECT user_a_id AS user_id FROM dm_chats WHERE id=$1
+      UNION ALL
+      SELECT user_b_id AS user_id FROM dm_chats WHERE id=$1
+    )
+    SELECT
+      COUNT(*) FILTER (WHERE dr.last_read_message_id >= $2)::int AS read_count,
+      COUNT(*)::int AS total
+    FROM participants p
+    LEFT JOIN dm_reads dr
+      ON dr.chat_id=$1 AND dr.user_id=p.user_id
+    `,
+    [chatId, messageId]
+  );
+  return { readCount: Number(rows[0]?.read_count || 0), total: Number(rows[0]?.total || 0) };
+}
+
+async function loadDmHistory(chatId, limit = 200) {
+  const { rows } = await pool.query(
+    `SELECT m.id,
+            m.text,
+            EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
+            u.display_name,
+            u.id AS sender_id
+     FROM dm_messages m
+     JOIN users u ON u.id = m.sender_user_id
+     WHERE m.chat_id=$1
+     ORDER BY m.id DESC
+     LIMIT $2`,
+    [chatId, limit]
+  );
+
+  const messages = rows.reverse().map(r => ({
+    id: Number(r.id),
+    text: r.text,
+    at: Number(r.at),
+    from: r.display_name,
+    fromId: Number(r.sender_id),
+    read: { readCount: 0, total: 0 },
+  }));
+
+  if (!messages.length) return messages;
+
+  // прогресс только для хвоста
+  const tail = messages.slice(Math.max(0, messages.length - 50));
+  for (const m of tail) {
+    m.read = await getDmReadProgress(chatId, m.id);
+  }
+  return messages;
+}
+
+async function saveDmMessage(chatId, senderUserId, text) {
+  const row = await queryOne(
+    `INSERT INTO dm_messages (chat_id, sender_user_id, text, created_at)
+     VALUES ($1,$2,$3,NOW())
+     RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at`,
+    [chatId, senderUserId, text]
+  );
+  return { id: Number(row.id), at: Number(row.at) };
+}
+
+async function getDmParticipants(chatId) {
+  const row = await queryOne(`SELECT user_a_id, user_b_id FROM dm_chats WHERE id=$1`, [chatId]);
+  if (!row) return [];
+  return [Number(row.user_a_id), Number(row.user_b_id)];
+}
+
+/* =========================
    DB migrate + seed
 ========================= */
 async function migrate() {
@@ -326,13 +522,13 @@ async function migrate() {
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       display_name TEXT NOT NULL,
-      system_role TEXT NOT NULL DEFAULT 'MEMBER', -- MEMBER|ADMIN|OWNER
+      system_role TEXT NOT NULL DEFAULT 'MEMBER',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS roles (
       id SERIAL PRIMARY KEY,
-      name TEXT UNIQUE NOT NULL,          -- slug
+      name TEXT UNIQUE NOT NULL,
       display_name TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -378,6 +574,31 @@ async function migrate() {
       PRIMARY KEY (channel_id, user_id)
     );
 
+    -- DM
+    CREATE TABLE IF NOT EXISTS dm_chats (
+      id BIGSERIAL PRIMARY KEY,
+      user_a_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_b_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_a_id, user_b_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS dm_messages (
+      id BIGSERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL REFERENCES dm_chats(id) ON DELETE CASCADE,
+      sender_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      text TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS dm_reads (
+      chat_id BIGINT NOT NULL REFERENCES dm_chats(id) ON DELETE CASCADE,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      last_read_message_id BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (chat_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -394,7 +615,6 @@ async function migrate() {
     );
   `);
 
-  // upgrade older DBs safely
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true;`);
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
@@ -418,6 +638,10 @@ async function migrate() {
       [r.name, r.display]
     );
   }
+
+  // полезные индексы для unread (быстрее)
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_id_id ON channel_messages(channel_id, id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_dm_messages_chat_id_id ON dm_messages(chat_id, id);`);
 }
 
 /* =========================
@@ -568,7 +792,6 @@ app.get("/api/me", requireAuth, async (req, res) => {
     `SELECT id, name, display_name FROM roles WHERE id = ANY($1::int[])`,
     [roleIds.length ? roleIds : [0]]
   );
-
   ok(res, {
     me: req.user,
     customRoles: rows.map((r) => ({
@@ -579,12 +802,114 @@ app.get("/api/me", requireAuth, async (req, res) => {
   });
 });
 
+// channels with unread
 app.get("/api/channels", requireAuth, async (req, res) => {
-  const channels = await listAccessibleChannels(req.user);
+  const channels = await listAccessibleChannelsWithUnread(req.user);
   ok(res, { channels });
 });
 
-/* ===== Admin endpoints ===== */
+/* ===== Users list for DM start ===== */
+app.get("/api/users", requireAuth, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, display_name, email, system_role
+     FROM users
+     WHERE id <> $1
+     ORDER BY display_name ASC
+     LIMIT 500`,
+    [req.user.id]
+  );
+  ok(res, {
+    users: rows.map(u => ({
+      id: Number(u.id),
+      displayName: u.display_name,
+      email: u.email,
+      systemRole: u.system_role,
+    }))
+  });
+});
+
+/* ===== DM list with unread ===== */
+app.get("/api/dm", requireAuth, async (req, res) => {
+  const meId = req.user.id;
+  const { rows } = await pool.query(
+    `
+    SELECT
+      c.id,
+      c.user_a_id,
+      c.user_b_id,
+      u1.display_name AS a_name,
+      u2.display_name AS b_name,
+      u1.email AS a_email,
+      u2.email AS b_email,
+      COALESCE(dr.last_read_message_id, 0)::bigint AS last_read_message_id,
+      COALESCE(lm.id, 0)::bigint AS last_message_id,
+      lm.text AS last_text,
+      EXTRACT(EPOCH FROM lm.created_at)*1000 AS last_at,
+      COALESCE(uc.unread_count, 0)::int AS unread_count
+    FROM dm_chats c
+    JOIN users u1 ON u1.id = c.user_a_id
+    JOIN users u2 ON u2.id = c.user_b_id
+    LEFT JOIN dm_reads dr
+      ON dr.chat_id = c.id AND dr.user_id = $1
+    LEFT JOIN LATERAL (
+      SELECT id, text, created_at
+      FROM dm_messages m
+      WHERE m.chat_id = c.id
+      ORDER BY m.id DESC
+      LIMIT 1
+    ) lm ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS unread_count
+      FROM dm_messages m
+      WHERE m.chat_id = c.id
+        AND m.id > COALESCE(dr.last_read_message_id, 0)
+        AND m.sender_user_id <> $1
+    ) uc ON true
+    WHERE c.user_a_id = $1 OR c.user_b_id = $1
+    ORDER BY COALESCE(lm.id, 0) DESC, c.id DESC
+    LIMIT 200
+    `,
+    [meId]
+  );
+
+  const chats = rows.map(r => {
+    const a = Number(r.user_a_id);
+    const b = Number(r.user_b_id);
+    const otherId = a === meId ? b : a;
+    const otherName = a === meId ? r.b_name : r.a_name;
+    const otherEmail = a === meId ? r.b_email : r.a_email;
+
+    return {
+      id: Number(r.id),
+      otherUser: { id: otherId, displayName: otherName, email: otherEmail },
+      lastMessageId: Number(r.last_message_id || 0),
+      unreadCount: Number(r.unread_count || 0),
+      last: Number(r.last_message_id || 0) ? {
+        id: Number(r.last_message_id),
+        text: r.last_text,
+        at: Number(r.last_at),
+      } : null
+    };
+  });
+
+  ok(res, { chats });
+});
+
+/* ===== Create or open DM with user ===== */
+app.post("/api/dm/open", requireAuth, async (req, res) => {
+  const otherUserId = Number(req.body.userId || 0);
+  if (!otherUserId) return fail(res, 400, "BAD_INPUT", "userId required");
+  if (otherUserId === req.user.id) return fail(res, 400, "BAD_INPUT", "cannot dm yourself");
+
+  const other = await queryOne(`SELECT id FROM users WHERE id=$1`, [otherUserId]);
+  if (!other) return fail(res, 404, "NOT_FOUND", "User not found");
+
+  const chatId = await ensureDmChat(req.user.id, otherUserId);
+  await auditLog(req.user.id, "DM_OPEN", { chatId, withUserId: otherUserId, at: nowIso() });
+  ok(res, { chatId });
+});
+
+/* ===== Admin endpoints (existing) ===== */
 app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, email, display_name, system_role, created_at
@@ -763,8 +1088,84 @@ app.get("/api/audit", requireAuth, requireOwner, async (_req, res) => {
   });
 });
 
+/* ===== DM AUDIT (OWNER/SUPERADMIN) ===== */
+app.get("/api/admin/dm/chats", requireAuth, requireOwner, async (_req, res) => {
+  const { rows } = await pool.query(
+    `
+    SELECT c.id,
+           c.user_a_id,
+           c.user_b_id,
+           u1.display_name AS a_name,
+           u2.display_name AS b_name,
+           u1.email AS a_email,
+           u2.email AS b_email,
+           lm.id AS last_message_id,
+           lm.text AS last_text,
+           EXTRACT(EPOCH FROM lm.created_at)*1000 AS last_at
+    FROM dm_chats c
+    JOIN users u1 ON u1.id = c.user_a_id
+    JOIN users u2 ON u2.id = c.user_b_id
+    LEFT JOIN LATERAL (
+      SELECT id, text, created_at
+      FROM dm_messages m
+      WHERE m.chat_id = c.id
+      ORDER BY m.id DESC
+      LIMIT 1
+    ) lm ON true
+    ORDER BY COALESCE(lm.id, 0) DESC, c.id DESC
+    LIMIT 300
+    `
+  );
+
+  ok(res, {
+    chats: rows.map(r => ({
+      id: Number(r.id),
+      a: { id: Number(r.user_a_id), displayName: r.a_name, email: r.a_email },
+      b: { id: Number(r.user_b_id), displayName: r.b_name, email: r.b_email },
+      last: r.last_message_id ? { id: Number(r.last_message_id), text: r.last_text, at: Number(r.last_at) } : null
+    }))
+  });
+});
+
+app.get("/api/admin/dm/chats/:id/messages", requireAuth, requireOwner, async (req, res) => {
+  const chatId = Number(req.params.id);
+  if (!chatId) return fail(res, 400, "BAD_INPUT", "bad chat id");
+
+  const chat = await queryOne(`SELECT user_a_id, user_b_id FROM dm_chats WHERE id=$1`, [chatId]);
+  if (!chat) return fail(res, 404, "NOT_FOUND", "Chat not found");
+
+  const { rows } = await pool.query(
+    `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
+            u.id AS sender_id, u.display_name AS sender_name, u.email AS sender_email
+     FROM dm_messages m
+     JOIN users u ON u.id = m.sender_user_id
+     WHERE m.chat_id=$1
+     ORDER BY m.id ASC
+     LIMIT 500`,
+    [chatId]
+  );
+
+  await auditLog(req.user.id, "DM_AUDIT_VIEW", {
+    chatId,
+    userAId: Number(chat.user_a_id),
+    userBId: Number(chat.user_b_id),
+    at: nowIso(),
+  });
+
+  ok(res, {
+    messages: rows.map(r => ({
+      id: Number(r.id),
+      at: Number(r.at),
+      text: r.text,
+      fromId: Number(r.sender_id),
+      from: r.sender_name,
+      fromEmail: r.sender_email,
+    }))
+  });
+});
+
 /* =========================
-   WebSocket (auth + channels + read receipts + presence)
+   WebSocket (channels + DM + receipts + presence + unread notices)
 ========================= */
 async function wsGetUserFromReq(req) {
   const raw = req.headers.cookie || "";
@@ -772,13 +1173,11 @@ async function wsGetUserFromReq(req) {
   const token = parsed.session || "";
   return await getUserBySessionToken(token);
 }
-
 function wsSend(ws, obj) {
   if (ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
-
 async function wsSendInit(ws) {
-  const channels = await listAccessibleChannels(ws.user);
+  const channels = await listAccessibleChannelsWithUnread(ws.user);
   wsSend(ws, {
     type: "init",
     me: ws.user,
@@ -789,11 +1188,8 @@ async function wsSendInit(ws) {
 
 async function loadChannelHistoryWithReads(channelId, limit = 200) {
   const { rows } = await pool.query(
-    `SELECT m.id,
-            m.text,
-            EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
-            u.display_name,
-            u.id AS sender_id
+    `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
+            u.display_name, u.id AS sender_id
      FROM channel_messages m
      JOIN users u ON u.id = m.sender_user_id
      WHERE m.channel_id=$1
@@ -811,14 +1207,11 @@ async function loadChannelHistoryWithReads(channelId, limit = 200) {
     read: { readCount: 0, total: 0 },
   }));
 
+  if (!messages.length) return { messages, totalEligible: 0, lastMessageId: 0 };
+
   const eligibleIds = await getEligibleUserIdsForChannel(channelId);
   const total = eligibleIds.length;
 
-  if (messages.length === 0) {
-    return { messages, totalEligible: total };
-  }
-
-  // last read by user for this channel
   const { rows: readRows } = await pool.query(
     `SELECT user_id, last_read_message_id
      FROM channel_reads
@@ -829,8 +1222,17 @@ async function loadChannelHistoryWithReads(channelId, limit = 200) {
   const lastReadByUser = new Map();
   for (const rr of readRows) lastReadByUser.set(Number(rr.user_id), Number(rr.last_read_message_id));
 
-  computeReadCountsForMessages(messages, eligibleIds, lastReadByUser);
-  return { messages, totalEligible: total };
+  for (const m of messages.slice(Math.max(0, messages.length - 50))) {
+    let readCount = 0;
+    for (const uid of eligibleIds) {
+      const last = lastReadByUser.get(uid) || 0;
+      if (last >= m.id) readCount += 1;
+    }
+    m.read = { readCount, total };
+  }
+
+  const lastMessageId = messages[messages.length - 1].id;
+  return { messages, totalEligible: total, lastMessageId };
 }
 
 async function saveChannelMessage(channelId, senderUserId, text) {
@@ -850,6 +1252,13 @@ function broadcastToChannelId(channelId, obj) {
   }
 }
 
+function broadcastToDmChatId(chatId, obj) {
+  const payload = JSON.stringify(obj);
+  for (const c of wss.clients) {
+    if (c.readyState === 1 && c.dmChatId === chatId) c.send(payload);
+  }
+}
+
 wss.on("connection", async (ws, req) => {
   const user = await wsGetUserFromReq(req);
   if (!user) {
@@ -859,19 +1268,18 @@ wss.on("connection", async (ws, req) => {
 
   ws.user = user;
   ws.channelId = null;
+  ws.dmChatId = null;
   ws.isAlive = true;
 
-  // online
+  addSocket(user.id, ws);
+
   const { was, now } = setOnline(user.id, +1);
-  if (!was && now) {
-    broadcastAll({ type: "presence_update", userId: user.id, online: true });
-  }
+  if (!was && now) broadcastAll({ type: "presence_update", userId: user.id, online: true });
 
   ws.on("close", () => {
+    removeSocket(user.id, ws);
     const { was: w, now: n } = setOnline(user.id, -1);
-    if (w && !n) {
-      broadcastAll({ type: "presence_update", userId: user.id, online: false });
-    }
+    if (w && !n) broadcastAll({ type: "presence_update", userId: user.id, online: false });
   });
 
   ws.on("pong", () => (ws.isAlive = true));
@@ -882,6 +1290,7 @@ wss.on("connection", async (ws, req) => {
     let msg;
     try { msg = JSON.parse(buf.toString("utf8")); } catch { return; }
 
+    /* ===== Channels ===== */
     if (msg.type === "join" && typeof msg.channelId === "number") {
       const channelId = Math.floor(msg.channelId);
       const allowed = await canAccessChannel(ws.user, channelId);
@@ -889,13 +1298,20 @@ wss.on("connection", async (ws, req) => {
         wsSend(ws, { type: "error", code: "NO_ACCESS", message: "No access to channel" });
         return;
       }
-
       ws.channelId = channelId;
+      ws.dmChatId = null;
 
       const history = await loadChannelHistoryWithReads(channelId, 200);
       wsSend(ws, { type: "joined", channelId, totalEligible: history.totalEligible });
       wsSend(ws, { type: "history", channelId, messages: history.messages, totalEligible: history.totalEligible });
 
+      // при заходе считаем, что прочитал последнее сообщение
+      if (history.lastMessageId) {
+        await upsertChannelRead(channelId, ws.user.id, history.lastMessageId);
+
+        // обновим unread для списка у этого пользователя
+        sendToUser(ws.user.id, { type: "refresh_lists" });
+      }
       return;
     }
 
@@ -905,44 +1321,42 @@ wss.on("connection", async (ws, req) => {
       if (!ws.channelId) return;
 
       const allowed = await canAccessChannel(ws.user, ws.channelId);
-      if (!allowed) {
-        wsSend(ws, { type: "error", code: "NO_ACCESS", message: "No access to channel" });
-        return;
-      }
+      if (!allowed) return;
 
       const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000));
 
-      // mark sender as read at least for own message
+      // sender read
       await upsertChannelRead(ws.channelId, ws.user.id, saved.id);
-
       const prog = await getReadProgressForMessage(ws.channelId, saved.id);
 
-      const message = {
-        id: saved.id,
-        at: saved.at,
-        from: ws.user.displayName,
-        fromId: ws.user.id,
-        text: text.slice(0, 2000),
-        read: { readCount: prog.readCount, total: prog.total },
-      };
+      broadcastToChannelId(ws.channelId, {
+        type: "chat",
+        channelId: ws.channelId,
+        message: {
+          id: saved.id,
+          at: saved.at,
+          from: ws.user.displayName,
+          fromId: ws.user.id,
+          text: text.slice(0, 2000),
+          read: { readCount: prog.readCount, total: prog.total },
+        }
+      });
 
-      broadcastToChannelId(ws.channelId, { type: "chat", channelId: ws.channelId, message });
+      // уведомление ВСЕМ: "в канале новые сообщения" -> клиент сам перезапросит /api/channels
+      broadcastAll({ type: "channel_notice", channelId: ws.channelId });
+
       return;
     }
 
-    // NEW: read receipt update
     if (msg.type === "read" && typeof msg.channelId === "number" && typeof msg.lastReadMessageId === "number") {
       const channelId = Math.floor(msg.channelId);
       const lastReadMessageId = Math.floor(msg.lastReadMessageId);
-
       const allowed = await canAccessChannel(ws.user, channelId);
       if (!allowed) return;
 
       await upsertChannelRead(channelId, ws.user.id, lastReadMessageId);
-
       const prog = await getReadProgressForMessage(channelId, lastReadMessageId);
 
-      // broadcast progress for that messageId
       broadcastToChannelId(channelId, {
         type: "read_progress",
         channelId,
@@ -950,6 +1364,96 @@ wss.on("connection", async (ws, req) => {
         read: { readCount: prog.readCount, total: prog.total },
       });
 
+      // обновим unread у текущего пользователя (в списке слева)
+      sendToUser(ws.user.id, { type: "refresh_lists" });
+      return;
+    }
+
+    /* ===== DM ===== */
+    if (msg.type === "dm_join" && typeof msg.chatId === "number") {
+      const chatId = Math.floor(msg.chatId);
+      const allowed = await canAccessDmChat(ws.user.id, chatId);
+      if (!allowed) {
+        wsSend(ws, { type: "error", code: "NO_ACCESS", message: "No access to DM" });
+        return;
+      }
+
+      ws.dmChatId = chatId;
+      ws.channelId = null;
+
+      const otherId = await getDmOtherUserId(chatId, ws.user.id);
+      const other = otherId ? await queryOne(`SELECT id, display_name, email FROM users WHERE id=$1`, [otherId]) : null;
+
+      const messages = await loadDmHistory(chatId, 200);
+      wsSend(ws, {
+        type: "dm_history",
+        chatId,
+        otherUser: other ? { id: Number(other.id), displayName: other.display_name, email: other.email } : null,
+        messages
+      });
+
+      if (messages.length) {
+        const lastId = messages[messages.length - 1].id;
+        await upsertDmRead(chatId, ws.user.id, lastId);
+        const prog = await getDmReadProgress(chatId, lastId);
+        broadcastToDmChatId(chatId, { type: "dm_read_progress", chatId, messageId: lastId, read: prog });
+
+        // обновим unread у юзера
+        sendToUser(ws.user.id, { type: "refresh_lists" });
+      }
+      return;
+    }
+
+    if (msg.type === "dm_chat" && typeof msg.text === "string") {
+      const text = msg.text.trim();
+      if (!text) return;
+      if (!ws.dmChatId) return;
+
+      const chatId = ws.dmChatId;
+      const allowed = await canAccessDmChat(ws.user.id, chatId);
+      if (!allowed) return;
+
+      const saved = await saveDmMessage(chatId, ws.user.id, text.slice(0, 2000));
+      await upsertDmRead(chatId, ws.user.id, saved.id);
+      const prog = await getDmReadProgress(chatId, saved.id);
+
+      broadcastToDmChatId(chatId, {
+        type: "dm_chat",
+        chatId,
+        message: {
+          id: saved.id,
+          at: saved.at,
+          from: ws.user.displayName,
+          fromId: ws.user.id,
+          text: text.slice(0, 2000),
+          read: prog,
+        }
+      });
+
+      // уведомим участников чата, чтобы обновили список DM (бейджи/последнее сообщение)
+      const participants = await getDmParticipants(chatId);
+      for (const uid of participants) {
+        sendToUser(uid, { type: "dm_notice", chatId });
+        sendToUser(uid, { type: "refresh_lists" });
+      }
+
+      return;
+    }
+
+    if (msg.type === "dm_read" && typeof msg.chatId === "number" && typeof msg.lastReadMessageId === "number") {
+      const chatId = Math.floor(msg.chatId);
+      const lastReadMessageId = Math.floor(msg.lastReadMessageId);
+
+      const allowed = await canAccessDmChat(ws.user.id, chatId);
+      if (!allowed) return;
+
+      await upsertDmRead(chatId, ws.user.id, lastReadMessageId);
+      const prog = await getDmReadProgress(chatId, lastReadMessageId);
+
+      broadcastToDmChatId(chatId, { type: "dm_read_progress", chatId, messageId: lastReadMessageId, read: prog });
+
+      // обновим unread у этого пользователя
+      sendToUser(ws.user.id, { type: "refresh_lists" });
       return;
     }
   });
@@ -969,12 +1473,10 @@ setInterval(() => {
 ========================= */
 const PORT = process.env.PORT || 3000;
 
-// 1) открываем порт сразу (Render увидит)
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Listening on :${PORT}`);
 });
 
-// 2) миграции после старта
 (async () => {
   try {
     await migrate();
