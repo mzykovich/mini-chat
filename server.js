@@ -22,6 +22,11 @@ const pool = new Pool({
 });
 
 const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || "").trim().toLowerCase();
+const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS || "").trim().toLowerCase();
+// пример: "company.com" или "company.com,subsidiary.org"
+const ALLOWED_EMAIL_DOMAIN_LIST = ALLOWED_EMAIL_DOMAINS
+  ? ALLOWED_EMAIL_DOMAINS.split(",").map(s => s.trim()).filter(Boolean)
+  : [];
 
 /* =========================
    Helpers
@@ -35,6 +40,14 @@ function randToken() {
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
+function emailDomainAllowed(email) {
+  if (!ALLOWED_EMAIL_DOMAIN_LIST.length) return true;
+  const at = String(email || "").lastIndexOf("@");
+  if (at < 0) return false;
+  const domain = String(email).slice(at + 1).toLowerCase();
+  return ALLOWED_EMAIL_DOMAIN_LIST.includes(domain);
+}
+
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -146,16 +159,32 @@ async function requireAuth(req, res, next) {
   next();
 }
 
+
+function logForbiddenAttempt(req, required) {
+  const u = req.user;
+  if (!u) return;
+  safeAuditLog(u.id, "FORBIDDEN_ATTEMPT", {
+    at: nowIso(),
+    required,
+    path: req.path,
+    method: req.method,
+    systemRole: u.systemRole,
+    isSuperadmin: Boolean(u.isSuperadmin),
+  });
+}
+
 function requireOwnerOrAdmin(req, res, next) {
   const u = req.user;
   if (u.isSuperadmin) return next();
   if (u.systemRole === "OWNER" || u.systemRole === "ADMIN") return next();
+  logForbiddenAttempt(req, "OWNER_OR_ADMIN");
   return fail(res, 403, "FORBIDDEN", "Not enough permissions");
 }
 function requireOwner(req, res, next) {
   const u = req.user;
   if (u.isSuperadmin) return next();
   if (u.systemRole === "OWNER") return next();
+  logForbiddenAttempt(req, "OWNER_ONLY");
   return fail(res, 403, "FORBIDDEN", "Owner only");
 }
 
@@ -290,6 +319,40 @@ async function listAccessibleChannelsWithUnread(user) {
   }));
 }
 
+
+async function validateInviteForRegister(inviteToken) {
+  const token = String(inviteToken || "").trim();
+  if (!token) return { ok: false, code: "INVITE_REQUIRED", message: "Нужен инвайт-код" };
+
+  const inv = await queryOne(
+    `SELECT id, token, expires_at, max_uses, used_count, is_revoked
+     FROM invites
+     WHERE token=$1`,
+    [token]
+  );
+  if (!inv) return { ok: false, code: "INVITE_INVALID", message: "Инвайт недействителен" };
+  if (inv.is_revoked) return { ok: false, code: "INVITE_REVOKED", message: "Инвайт отозван" };
+  if (inv.expires_at && new Date(inv.expires_at).getTime() < Date.now()) {
+    return { ok: false, code: "INVITE_EXPIRED", message: "Инвайт истёк" };
+  }
+  if (Number(inv.used_count) >= Number(inv.max_uses)) {
+    return { ok: false, code: "INVITE_USED_UP", message: "Инвайт уже использован" };
+  }
+  return { ok: true, inviteId: Number(inv.id), token: inv.token };
+}
+
+async function consumeInvite(inviteId) {
+  // инкремент с защитой от гонок
+  const row = await queryOne(
+    `UPDATE invites
+     SET used_count = used_count + 1
+     WHERE id=$1 AND is_revoked=false AND (expires_at IS NULL OR expires_at > NOW()) AND used_count < max_uses
+     RETURNING id`,
+    [inviteId]
+  );
+  return Boolean(row);
+}
+
 async function auditLog(actorUserId, action, metaObj) {
   await pool.query(
     `INSERT INTO audit_logs (actor_user_id, action, meta)
@@ -297,6 +360,15 @@ async function auditLog(actorUserId, action, metaObj) {
     [actorUserId, action, JSON.stringify(metaObj || {})]
   );
 }
+
+async function safeAuditLog(actorUserId, action, metaObj) {
+  try {
+    await auditLog(actorUserId, action, metaObj);
+  } catch {
+    // never break request on audit failure
+  }
+}
+
 
 /* =========================
    Read receipts (channels, вариант B)
@@ -313,17 +385,16 @@ async function getEligibleUserIdsForChannel(channelId) {
   const ch = await queryOne(`SELECT id, is_public FROM channels WHERE id=$1`, [channelId]);
   if (!ch) return [];
 
-  const superId = await getSuperadminUserIdOrNull();
+  // SUPERADMIN может иметь доступ, но НЕ должен учитываться в "прочитано X/Y".
+  // Поэтому здесь считаем только обычных пользователей + OWNER, которым реально положен доступ.
 
+  // public => все пользователи (OWNER уже входит в users)
   if (ch.is_public) {
     const { rows } = await pool.query(`SELECT id FROM users ORDER BY id ASC`);
-    const ids = new Set(rows.map(r => Number(r.id)));
-    const ownerRows = await pool.query(`SELECT id FROM users WHERE system_role='OWNER'`);
-    for (const r of ownerRows.rows) ids.add(Number(r.id));
-    if (superId) ids.add(superId);
-    return [...ids];
+    return rows.map(r => Number(r.id));
   }
 
+  // private => (role_access users) U (direct user access) U OWNER
   const { rows } = await pool.query(
     `
     WITH role_users AS (
@@ -339,18 +410,14 @@ async function getEligibleUserIdsForChannel(channelId) {
     ),
     owners AS (
       SELECT id FROM users WHERE system_role='OWNER'
-    ),
-    super AS (
-      SELECT id FROM users WHERE $2::int IS NOT NULL AND id = $2::int
     )
     SELECT DISTINCT id FROM (
       SELECT id FROM role_users
       UNION ALL SELECT id FROM direct_users
       UNION ALL SELECT id FROM owners
-      UNION ALL SELECT id FROM super
     ) t
     `,
-    [channelId, superId]
+    [channelId]
   );
 
   return rows.map(r => Number(r.id));
@@ -644,7 +711,18 @@ async function migrate() {
       expires_at TIMESTAMPTZ NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS audit_logs (
+    
+    CREATE TABLE IF NOT EXISTS invites (
+      id BIGSERIAL PRIMARY KEY,
+      token TEXT UNIQUE NOT NULL,
+      created_by_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NULL,
+      max_uses INT NOT NULL DEFAULT 1,
+      used_count INT NOT NULL DEFAULT 0,
+      is_revoked BOOLEAN NOT NULL DEFAULT false
+    );
+CREATE TABLE IF NOT EXISTS audit_logs (
       id BIGSERIAL PRIMARY KEY,
       actor_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       action TEXT NOT NULL,
@@ -704,8 +782,10 @@ app.post("/api/register", async (req, res) => {
   const password = String(req.body.password || "");
   const displayName = normalizeName(req.body.displayName);
   const positionRoleId = Number(req.body.positionRoleId || 0);
+  const inviteToken = String(req.body.inviteToken || "").trim();
 
   if (!isValidEmail(email)) return fail(res, 400, "BAD_EMAIL", "Invalid email");
+  if (!emailDomainAllowed(email)) return fail(res, 400, "EMAIL_DOMAIN_NOT_ALLOWED", "Email домен не разрешён");
   if (password.length < 6) return fail(res, 400, "BAD_PASSWORD", "Password must be at least 6 chars");
   if (!positionRoleId) return fail(res, 400, "BAD_POSITION", "Choose a position");
 
@@ -717,6 +797,13 @@ app.post("/api/register", async (req, res) => {
   const countRow = await queryOne(`SELECT COUNT(*)::int AS c FROM users`, []);
   const isFirst = Number(countRow?.c || 0) === 0;
   const systemRole = isFirst ? "OWNER" : "MEMBER";
+
+  let inviteInfo = null;
+  if (!isFirst) {
+    const v = await validateInviteForRegister(inviteToken);
+    if (!v.ok) return fail(res, 400, v.code, v.message);
+    inviteInfo = v;
+  }
 
   const user = await queryOne(
     `INSERT INTO users (email, password_hash, display_name, system_role)
@@ -731,6 +818,12 @@ app.post("/api/register", async (req, res) => {
      ON CONFLICT DO NOTHING`,
     [user.id, positionRoleId]
   );
+
+  if (inviteInfo) {
+    const consumed = await consumeInvite(inviteInfo.inviteId);
+    if (!consumed) return fail(res, 400, "INVITE_USED_UP", "Инвайт уже использован");
+    await auditLog(Number(user.id), "INVITE_USE", { inviteId: inviteInfo.inviteId, at: nowIso() });
+  }
 
   const token = randToken();
   await pool.query(
@@ -1100,6 +1193,72 @@ app.post("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, asy
   }
 
   await auditLog(req.user.id, "CHANNEL_ACCESS_SET", { channelId, roleIds, userIds, at: nowIso() });
+  ok(res, {});
+});
+
+
+app.post("/api/admin/invites", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const maxUses = Math.max(1, Math.min(1000, Number(req.body.maxUses || 1)));
+  const expiresInHours = Number(req.body.expiresInHours || 0);
+  const token = crypto.randomBytes(16).toString("hex");
+
+  let expiresAt = null;
+  if (expiresInHours && Number.isFinite(expiresInHours) && expiresInHours > 0) {
+    expiresAt = new Date(Date.now() + expiresInHours * 3600 * 1000).toISOString();
+  }
+
+  const row = await queryOne(
+    `INSERT INTO invites (token, created_by_user_id, expires_at, max_uses)
+     VALUES ($1,$2,$3,$4)
+     RETURNING id, token, created_at, expires_at, max_uses, used_count, is_revoked`,
+    [token, req.user.id, expiresAt, maxUses]
+  );
+
+  await auditLog(req.user.id, "INVITE_CREATE", { inviteId: Number(row.id), maxUses, expiresAt, at: nowIso() });
+  ok(res, { invite: {
+    id: Number(row.id),
+    token: row.token,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    maxUses: Number(row.max_uses),
+    usedCount: Number(row.used_count),
+    isRevoked: Boolean(row.is_revoked),
+  }});
+});
+
+app.get("/api/admin/invites", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT i.id, i.token, i.created_at, i.expires_at, i.max_uses, i.used_count, i.is_revoked,
+            u.email AS created_by_email, u.display_name AS created_by_name
+     FROM invites i
+     JOIN users u ON u.id = i.created_by_user_id
+     ORDER BY i.id DESC
+     LIMIT 200`
+  );
+
+  ok(res, { invites: rows.map(r => ({
+    id: Number(r.id),
+    token: r.token,
+    createdAt: r.created_at,
+    expiresAt: r.expires_at,
+    maxUses: Number(r.max_uses),
+    usedCount: Number(r.used_count),
+    isRevoked: Boolean(r.is_revoked),
+    createdBy: { email: r.created_by_email, displayName: r.created_by_name }
+  }))});
+});
+
+app.delete("/api/admin/invites/:id", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const inviteId = Number(req.params.id);
+  if (!inviteId) return fail(res, 400, "BAD_INPUT", "bad invite id");
+
+  const row = await queryOne(
+    `UPDATE invites SET is_revoked=true WHERE id=$1 RETURNING id`,
+    [inviteId]
+  );
+  if (!row) return fail(res, 404, "NOT_FOUND", "Invite not found");
+
+  await auditLog(req.user.id, "INVITE_REVOKE", { inviteId, at: nowIso() });
   ok(res, {});
 });
 
