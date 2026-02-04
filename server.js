@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
@@ -20,6 +21,27 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
+
+const MAX_ATTACHMENT_BYTES = Number(process.env.MAX_ATTACHMENT_BYTES || 2 * 1024 * 1024);
+
+
+// cached settings
+let _maxAttachmentCache = { value: MAX_ATTACHMENT_BYTES, at: 0 };
+async function getMaxAttachmentBytes() {
+  const ttlMs = 30_000;
+  const now = Date.now();
+  if (now - _maxAttachmentCache.at < ttlMs) return _maxAttachmentCache.value;
+
+  try {
+    const row = await queryOne(`SELECT value FROM app_settings WHERE key='max_attachment_bytes'`, []);
+    const v = row ? Number(row.value) : MAX_ATTACHMENT_BYTES;
+    const val = Number.isFinite(v) && v > 0 ? v : MAX_ATTACHMENT_BYTES;
+    _maxAttachmentCache = { value: val, at: now };
+    return val;
+  } catch {
+    return MAX_ATTACHMENT_BYTES;
+  }
+}
 
 const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || "").trim().toLowerCase();
 const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS || "").trim().toLowerCase();
@@ -123,13 +145,14 @@ async function getUserBySessionToken(sessionToken) {
   if (!sessionToken) return null;
 
   const row = await queryOne(
-    `SELECT u.id, u.email, u.display_name, u.system_role, u.created_at
+    `SELECT u.id, u.email, u.display_name, u.system_role, u.created_at, u.is_active
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token = $1 AND s.expires_at > NOW()`,
     [sessionToken]
   );
   if (!row) return null;
+  if (row.is_active === false) return null;
 
   const email = String(row.email).toLowerCase();
   const isSuper = SUPERADMIN_EMAIL && email === SUPERADMIN_EMAIL;
@@ -188,6 +211,14 @@ function requireOwner(req, res, next) {
   return fail(res, 403, "FORBIDDEN", "Owner only");
 }
 
+function requireSuperadmin(req, res, next) {
+  const u = req.user;
+  if (u && u.isSuperadmin) return next();
+  logForbiddenAttempt(req, "SUPERADMIN_ONLY");
+  return fail(res, 403, "FORBIDDEN", "Superadmin only");
+}
+
+
 /* =========================
    Roles & Access (channels)
 ========================= */
@@ -202,8 +233,9 @@ async function getUserCustomRoleIds(userId) {
 async function canAccessChannel(user, channelId) {
   if (user.isSuperadmin || user.systemRole === "OWNER") return true;
 
-  const ch = await queryOne(`SELECT id, is_public FROM channels WHERE id=$1`, [channelId]);
+  const ch = await queryOne(`SELECT id, is_public, deleted_at FROM channels WHERE id=$1`, [channelId]);
   if (!ch) return false;
+  if (ch.deleted_at) return false;
   if (ch.is_public) return true;
 
   const uacc = await queryOne(
@@ -252,6 +284,7 @@ async function listAccessibleChannelsWithUnread(user) {
           AND m.id > COALESCE(cr.last_read_message_id, 0)
           AND m.sender_user_id <> $1
       ) uc ON true
+      WHERE c.deleted_at IS NULL
       ORDER BY c.name ASC
       LIMIT 200
       `,
@@ -278,9 +311,9 @@ async function listAccessibleChannelsWithUnread(user) {
         ON cua.channel_id = c.id AND cua.user_id = $1
       LEFT JOIN channel_role_access cra
         ON cra.channel_id = c.id AND (cra.role_id = ANY($2::int[]) OR $2::int[] IS NULL)
-      WHERE c.is_public = true
+      WHERE c.deleted_at IS NULL AND (c.is_public = true
          OR cua.user_id IS NOT NULL
-         OR cra.role_id IS NOT NULL
+         OR cra.role_id IS NOT NULL)
     )
     SELECT
       a.id, a.name, a.is_public,
@@ -382,7 +415,7 @@ async function getSuperadminUserIdOrNull() {
 }
 
 async function getEligibleUserIdsForChannel(channelId) {
-  const ch = await queryOne(`SELECT id, is_public FROM channels WHERE id=$1`, [channelId]);
+  const ch = await queryOne(`SELECT id, is_public, deleted_at FROM channels WHERE id=$1`, [channelId]);
   if (!ch) return [];
 
   // SUPERADMIN может иметь доступ, но НЕ должен учитываться в "прочитано X/Y".
@@ -549,6 +582,55 @@ async function upsertDmRead(chatId, userId, lastReadMessageId) {
   );
 }
 
+
+async function getLastDmMessageIds(chatId, limit = 30) {
+  const { rows } = await pool.query(
+    `SELECT id FROM dm_messages WHERE chat_id=$1 ORDER BY id DESC LIMIT $2`,
+    [chatId, limit]
+  );
+  return rows.map(r => Number(r.id)).reverse();
+}
+
+async function getDmReadProgressBatch(chatId, messageIds) {
+  if (!messageIds.length) return { total: 0, items: [] };
+
+  const { rows: pr } = await pool.query(
+    `SELECT user_a_id, user_b_id FROM dm_chats WHERE id=$1`,
+    [chatId]
+  );
+  const a = pr[0] ? Number(pr[0].user_a_id) : 0;
+  const b = pr[0] ? Number(pr[0].user_b_id) : 0;
+  const participants = [a, b].filter(Boolean);
+  const total = participants.length;
+
+  const { rows } = await pool.query(
+    `SELECT user_id, last_read_message_id
+     FROM dm_reads
+     WHERE chat_id=$1 AND user_id = ANY($2::int[])`,
+    [chatId, participants]
+  );
+
+  const lastReadByUser = new Map();
+  for (const rr of rows) lastReadByUser.set(Number(rr.user_id), Number(rr.last_read_message_id));
+
+  const items = messageIds.map((mid) => {
+    let readCount = 0;
+    for (const uid of participants) {
+      const last = lastReadByUser.get(uid) || 0;
+      if (last >= mid) readCount += 1;
+    }
+    return { messageId: mid, readCount, total };
+  });
+
+  return { total, items };
+}
+
+async function broadcastDmReadBatch(chatId) {
+  const ids = await getLastDmMessageIds(chatId, 30);
+  const batch = await getDmReadProgressBatch(chatId, ids);
+  broadcastToDmChatId(chatId, { type: "dm_read_progress_batch", chatId, items: batch.items });
+}
+
 async function getDmReadProgress(chatId, messageId) {
   const { rows } = await pool.query(
     `
@@ -573,11 +655,15 @@ async function loadDmHistory(chatId, limit = 200) {
   const { rows } = await pool.query(
     `SELECT m.id,
             m.text,
+            m.deleted_at, m.deleted_by_user_id, m.edited_at, m.edited_by_user_id,
+            m.edited_at, m.edited_by_user_id,
             EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
             u.display_name,
-            u.id AS sender_id
+            u.id AS sender_id,
+            a.id AS attachment_id, a.file_name AS attachment_name, a.mime AS attachment_mime, a.size_bytes AS attachment_size
      FROM dm_messages m
      JOIN users u ON u.id = m.sender_user_id
+     LEFT JOIN attachments a ON a.id = m.attachment_id
      WHERE m.chat_id=$1
      ORDER BY m.id DESC
      LIMIT $2`,
@@ -587,10 +673,22 @@ async function loadDmHistory(chatId, limit = 200) {
   const messages = rows.reverse().map(r => ({
     id: Number(r.id),
     text: r.text,
+    deletedAt: r.deleted_at ? r.deleted_at : null,
+    deletedByUserId: r.deleted_by_user_id ? Number(r.deleted_by_user_id) : null,
+    editedAt: r.edited_at ? r.edited_at : null,
+    editedByUserId: r.edited_by_user_id ? Number(r.edited_by_user_id) : null,
     at: Number(r.at),
     from: r.display_name,
     fromId: Number(r.sender_id),
     read: { readCount: 0, total: 0 },
+    attachment: r.attachment_id ? {
+      id: Number(r.attachment_id),
+      name: r.attachment_name,
+      mime: r.attachment_mime,
+      size: Number(r.attachment_size || 0),
+      url: `/api/attachments/${Number(r.attachment_id)}`,
+      isImage: String(r.attachment_mime || "").startsWith("image/"),
+    } : null,
   }));
 
   const tail = messages.slice(Math.max(0, messages.length - 50));
@@ -601,14 +699,16 @@ async function loadDmHistory(chatId, limit = 200) {
   return messages;
 }
 
-async function saveDmMessage(chatId, senderUserId, text) {
+async function saveDmMessage(chatId, senderUserId, text, attachmentId) {
+  const att = await assertAndBindAttachment(Number(attachmentId || 0), senderUserId, { dmChatId: chatId });
+
   const row = await queryOne(
-    `INSERT INTO dm_messages (chat_id, sender_user_id, text, created_at)
-     VALUES ($1,$2,$3,NOW())
-     RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at`,
-    [chatId, senderUserId, text]
+    `INSERT INTO dm_messages (chat_id, sender_user_id, text, attachment_id, created_at)
+     VALUES ($1,$2,$3,$4,NOW())
+     RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at, attachment_id`,
+    [chatId, senderUserId, text, att ? att.id : null]
   );
-  return { id: Number(row.id), at: Number(row.at) };
+  return { id: Number(row.id), at: Number(row.at), attachment: att };
 }
 
 async function getDmParticipants(chatId) {
@@ -628,7 +728,8 @@ async function migrate() {
       password_hash TEXT NOT NULL,
       display_name TEXT NOT NULL,
       system_role TEXT NOT NULL DEFAULT 'MEMBER',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      is_active BOOLEAN NOT NULL DEFAULT true
     );
 
     CREATE TABLE IF NOT EXISTS roles (
@@ -648,6 +749,8 @@ async function migrate() {
       id SERIAL PRIMARY KEY,
       name TEXT UNIQUE NOT NULL,
       is_public BOOLEAN NOT NULL DEFAULT true,
+      deleted_at TIMESTAMPTZ NULL,
+      deleted_by_user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -663,11 +766,38 @@ async function migrate() {
       PRIMARY KEY (channel_id, user_id)
     );
 
+    -- DM (moved up)
+    CREATE TABLE IF NOT EXISTS dm_chats (
+      id BIGSERIAL PRIMARY KEY,
+      user_a_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_b_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_a_id, user_b_id)
+    );
+
+    -- Attachments (moved up)
+    CREATE TABLE IF NOT EXISTS attachments (
+      id BIGSERIAL PRIMARY KEY,
+      uploader_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      file_name TEXT NOT NULL,
+      mime TEXT NOT NULL,
+      size_bytes INT NOT NULL,
+      data BYTEA NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      bound_channel_id INT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      bound_dm_chat_id BIGINT NULL REFERENCES dm_chats(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS channel_messages (
       id BIGSERIAL PRIMARY KEY,
       channel_id INT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
       sender_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       text TEXT NOT NULL,
+      attachment_id BIGINT NULL REFERENCES attachments(id) ON DELETE SET NULL,
+      deleted_at TIMESTAMPTZ NULL,
+      deleted_by_user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
+      edited_at TIMESTAMPTZ NULL,
+      edited_by_user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -679,20 +809,16 @@ async function migrate() {
       PRIMARY KEY (channel_id, user_id)
     );
 
-    -- DM
-    CREATE TABLE IF NOT EXISTS dm_chats (
-      id BIGSERIAL PRIMARY KEY,
-      user_a_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      user_b_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (user_a_id, user_b_id)
-    );
-
     CREATE TABLE IF NOT EXISTS dm_messages (
       id BIGSERIAL PRIMARY KEY,
       chat_id BIGINT NOT NULL REFERENCES dm_chats(id) ON DELETE CASCADE,
       sender_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       text TEXT NOT NULL,
+      attachment_id BIGINT NULL REFERENCES attachments(id) ON DELETE SET NULL,
+      deleted_at TIMESTAMPTZ NULL,
+      deleted_by_user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
+      edited_at TIMESTAMPTZ NULL,
+      edited_by_user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -704,7 +830,15 @@ async function migrate() {
       PRIMARY KEY (chat_id, user_id)
     );
 
-    CREATE TABLE IF NOT EXISTS sessions (
+    
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+
+CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -722,6 +856,8 @@ async function migrate() {
       used_count INT NOT NULL DEFAULT 0,
       is_revoked BOOLEAN NOT NULL DEFAULT false
     );
+
+
 CREATE TABLE IF NOT EXISTS audit_logs (
       id BIGSERIAL PRIMARY KEY,
       actor_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -732,7 +868,52 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   `);
 
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;`);
+
+  await pool.query(`ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS attachment_id BIGINT NULL;`);
+  await pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS attachment_id BIGINT NULL;`);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'channel_messages_attachment_id_fkey'
+      ) THEN
+        ALTER TABLE channel_messages
+          ADD CONSTRAINT channel_messages_attachment_id_fkey
+          FOREIGN KEY (attachment_id) REFERENCES attachments(id)
+          ON DELETE SET NULL;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'dm_messages_attachment_id_fkey'
+      ) THEN
+        ALTER TABLE dm_messages
+          ADD CONSTRAINT dm_messages_attachment_id_fkey
+          FOREIGN KEY (attachment_id) REFERENCES attachments(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_attachments_bound_channel ON attachments(bound_channel_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_attachments_bound_dm ON attachments(bound_dm_chat_id);`);
+
   await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
+  await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;`);
+  await pool.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS deleted_by_user_id INT NULL;`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channels_deleted_by_user_id_fkey') THEN
+        ALTER TABLE channels
+          ADD CONSTRAINT channels_deleted_by_user_id_fkey
+          FOREIGN KEY (deleted_by_user_id) REFERENCES users(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
 
   await pool.query(
     `INSERT INTO channels (name, is_public)
@@ -759,6 +940,70 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_id_id ON channel_messages(channel_id, id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_sender_id_id ON channel_messages(channel_id, sender_user_id, id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_dm_messages_chat_id_id ON dm_messages(chat_id, id);`);
+  await pool.query(`ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;`);
+  await pool.query(`ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS deleted_by_user_id INT NULL;`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_messages_deleted_by_user_id_fkey') THEN
+        ALTER TABLE channel_messages
+          ADD CONSTRAINT channel_messages_deleted_by_user_id_fkey
+          FOREIGN KEY (deleted_by_user_id) REFERENCES users(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;`);
+  await pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS deleted_by_user_id INT NULL;`);
+
+  await pool.query(`ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ NULL;`);
+  await pool.query(`ALTER TABLE channel_messages ADD COLUMN IF NOT EXISTS edited_by_user_id INT NULL;`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_messages_edited_by_user_id_fkey') THEN
+        ALTER TABLE channel_messages
+          ADD CONSTRAINT channel_messages_edited_by_user_id_fkey
+          FOREIGN KEY (edited_by_user_id) REFERENCES users(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ NULL;`);
+  await pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS edited_by_user_id INT NULL;`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dm_messages_edited_by_user_id_fkey') THEN
+        ALTER TABLE dm_messages
+          ADD CONSTRAINT dm_messages_edited_by_user_id_fkey
+          FOREIGN KEY (edited_by_user_id) REFERENCES users(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'dm_messages_deleted_by_user_id_fkey') THEN
+        ALTER TABLE dm_messages
+          ADD CONSTRAINT dm_messages_deleted_by_user_id_fkey
+          FOREIGN KEY (deleted_by_user_id) REFERENCES users(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
+  await pool.query(
+    `INSERT INTO app_settings (key, value) VALUES ('max_attachment_bytes', $1)
+     ON CONFLICT (key) DO NOTHING`,
+    [String(MAX_ATTACHMENT_BYTES)]
+  );
+
 }
 
 /* =========================
@@ -863,11 +1108,12 @@ app.post("/api/login", async (req, res) => {
   if (!password) return fail(res, 400, "BAD_PASSWORD", "Password required");
 
   const row = await queryOne(
-    `SELECT id, email, password_hash, display_name, system_role
+    `SELECT id, email, password_hash, display_name, system_role, is_active
      FROM users WHERE email=$1`,
     [email]
   );
   if (!row) return fail(res, 401, "INVALID_LOGIN", "Wrong email or password");
+  if (row.is_active === false) return fail(res, 403, "USER_INACTIVE", "Пользователь деактивирован");
 
   const okPass = await bcrypt.compare(password, row.password_hash);
   if (!okPass) return fail(res, 401, "INVALID_LOGIN", "Wrong email or password");
@@ -941,7 +1187,7 @@ app.get("/api/channels", requireAuth, async (req, res) => {
 
 app.get("/api/users", requireAuth, async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, display_name, email, system_role
+    `SELECT id, display_name, email, system_role, is_active
      FROM users
      WHERE id <> $1
      ORDER BY display_name ASC
@@ -954,9 +1200,85 @@ app.get("/api/users", requireAuth, async (req, res) => {
       displayName: u.display_name,
       email: u.email,
       systemRole: u.system_role,
+      isActive: u.is_active,
+      isActive: u.is_active,
     }))
   });
 });
+
+app.post("/api/attachments", requireAuth, async (req, res) => {
+  const name = String(req.body.name || "").trim().slice(0, 200) || "file";
+  const mime = String(req.body.mime || "application/octet-stream").trim().slice(0, 200) || "application/octet-stream";
+  const dataBase64 = String(req.body.dataBase64 || "").trim();
+
+  if (!dataBase64) return fail(res, 400, "BAD_INPUT", "dataBase64 required");
+
+  let buf;
+  try {
+    buf = Buffer.from(dataBase64, "base64");
+  } catch {
+    return fail(res, 400, "BAD_INPUT", "bad base64");
+  }
+  if (!buf || !buf.length) return fail(res, 400, "BAD_INPUT", "empty file");
+  const maxBytes = await getMaxAttachmentBytes();
+  if (buf.length > maxBytes) return fail(res, 413, "FILE_TOO_LARGE", "Файл слишком большой");
+
+  const row = await queryOne(
+    `INSERT INTO attachments (uploader_user_id, file_name, mime, size_bytes, data)
+     VALUES ($1,$2,$3,$4,$5)
+     RETURNING id, file_name, mime, size_bytes, created_at`,
+    [req.user.id, name, mime, buf.length, buf]
+  );
+
+  await safeAuditLog(req.user.id, "ATTACHMENT_UPLOAD", { attachmentId: Number(row.id), size: buf.length, mime, at: nowIso() });
+
+  ok(res, {
+    attachment: {
+      id: Number(row.id),
+      name: row.file_name,
+      mime: row.mime,
+      size: Number(row.size_bytes),
+      url: `/api/attachments/${Number(row.id)}`,
+      isImage: String(row.mime || "").startsWith("image/"),
+    }
+  });
+});
+
+app.get("/api/attachments/:id", requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return fail(res, 400, "BAD_INPUT", "bad attachment id");
+
+  const a = await queryOne(
+    `SELECT id, uploader_user_id, file_name, mime, size_bytes, data, bound_channel_id, bound_dm_chat_id
+     FROM attachments
+     WHERE id=$1`,
+    [id]
+  );
+  if (!a) return fail(res, 404, "NOT_FOUND", "Attachment not found");
+
+  // доступ: если не привязан — только загрузивший
+  const boundChannelId = a.bound_channel_id ? Number(a.bound_channel_id) : null;
+  const boundDmChatId = a.bound_dm_chat_id ? Number(a.bound_dm_chat_id) : null;
+
+  let allowed = false;
+  if (!boundChannelId && !boundDmChatId) {
+    allowed = (Number(a.uploader_user_id) === req.user.id) || req.user.isSuperadmin || req.user.systemRole === "OWNER";
+  } else if (boundChannelId) {
+    allowed = await canAccessChannel(req.user, boundChannelId);
+  } else if (boundDmChatId) {
+    allowed = req.user.isSuperadmin || req.user.systemRole === "OWNER" || await canAccessDmChat(req.user.id, boundDmChatId);
+  }
+
+  if (!allowed) return fail(res, 403, "FORBIDDEN", "No access");
+
+  const mime = a.mime || "application/octet-stream";
+  res.setHeader("Content-Type", mime);
+  const isImage = String(mime).startsWith("image/");
+  const disp = isImage ? "inline" : "attachment";
+  res.setHeader("Content-Disposition", `${disp}; filename="${String(a.file_name || "file").replace(/"/g, "")}"`);
+  res.send(a.data);
+});
+
 
 app.get("/api/dm", requireAuth, async (req, res) => {
   const meId = req.user.id;
@@ -1040,7 +1362,7 @@ app.post("/api/dm/open", requireAuth, async (req, res) => {
 /* ===== Admin endpoints (как было) ===== */
 app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, email, display_name, system_role, created_at
+    `SELECT id, email, display_name, system_role, is_active, created_at
      FROM users
      ORDER BY id ASC
      LIMIT 500`
@@ -1051,9 +1373,74 @@ app.get("/api/admin/users", requireAuth, requireOwnerOrAdmin, async (_req, res) 
       email: u.email,
       displayName: u.display_name,
       systemRole: u.system_role,
+      isActive: u.is_active,
+      isActive: u.is_active,
       createdAt: u.created_at,
     })),
   });
+});
+
+
+app.post("/api/admin/users/:id/deactivate", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  if (!userId) return fail(res, 400, "BAD_INPUT", "bad user id");
+  if (userId === req.user.id) return fail(res, 400, "BAD_INPUT", "cannot deactivate yourself");
+
+  const row = await queryOne(`UPDATE users SET is_active=false WHERE id=$1 RETURNING id`, [userId]);
+  if (!row) return fail(res, 404, "NOT_FOUND", "User not found");
+
+  await safeAuditLog(req.user.id, "USER_DEACTIVATE", { userId, at: nowIso() });
+  ok(res, {});
+});
+
+app.post("/api/admin/users/:id/activate", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  if (!userId) return fail(res, 400, "BAD_INPUT", "bad user id");
+
+  const row = await queryOne(`UPDATE users SET is_active=true WHERE id=$1 RETURNING id`, [userId]);
+  if (!row) return fail(res, 404, "NOT_FOUND", "User not found");
+
+  await safeAuditLog(req.user.id, "USER_ACTIVATE", { userId, at: nowIso() });
+  ok(res, {});
+});
+
+app.post("/api/admin/users/:id/reset_password", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  if (!userId) return fail(res, 400, "BAD_INPUT", "bad user id");
+
+  // временный пароль (одноразово сообщить сотруднику)
+  const temp = crypto.randomBytes(6).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 10);
+  const hash = await bcrypt.hash(temp, 10);
+
+  const row = await queryOne(`UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id`, [userId, hash]);
+  if (!row) return fail(res, 404, "NOT_FOUND", "User not found");
+
+  await safeAuditLog(req.user.id, "USER_RESET_PASSWORD", { userId, at: nowIso() });
+  ok(res, { tempPassword: temp });
+});
+
+
+app.get("/api/admin/settings/attachments", requireAuth, requireSuperadmin, async (_req, res) => {
+  const maxBytes = await getMaxAttachmentBytes();
+  ok(res, { maxAttachmentBytes: maxBytes });
+});
+
+app.post("/api/admin/settings/attachments", requireAuth, requireSuperadmin, async (req, res) => {
+  const maxAttachmentBytes = Number(req.body.maxAttachmentBytes || 0);
+  if (!Number.isFinite(maxAttachmentBytes) || maxAttachmentBytes < 50_000 || maxAttachmentBytes > 50 * 1024 * 1024) {
+    return fail(res, 400, "BAD_INPUT", "maxAttachmentBytes must be between 50KB and 50MB");
+  }
+
+  await pool.query(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES ('max_attachment_bytes', $1, NOW())
+     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
+    [String(Math.floor(maxAttachmentBytes))]
+  );
+  _maxAttachmentCache.at = 0;
+
+  await safeAuditLog(req.user.id, "SETTINGS_ATTACHMENTS_UPDATE", { maxAttachmentBytes: Math.floor(maxAttachmentBytes), at: nowIso() });
+  ok(res, { maxAttachmentBytes: Math.floor(maxAttachmentBytes) });
 });
 
 app.get("/api/admin/roles", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
@@ -1132,7 +1519,7 @@ app.delete("/api/admin/users/:id/roles/:roleId", requireAuth, requireOwnerOrAdmi
 
 app.get("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, name, is_public FROM channels ORDER BY name ASC LIMIT 200`
+    `SELECT id, name, is_public FROM channels WHERE deleted_at IS NULL ORDER BY name ASC LIMIT 200`
   );
   ok(res, { channels: rows.map(c => ({ id: Number(c.id), name: c.name, isPublic: c.is_public })) });
 });
@@ -1153,6 +1540,71 @@ app.post("/api/admin/channels", requireAuth, requireOwnerOrAdmin, async (req, re
   await auditLog(req.user.id, "CHANNEL_CREATE", { name, isPublic, at: nowIso() });
   ok(res, { channel: { id: Number(ch.id), name: ch.name, isPublic: ch.is_public } });
 });
+
+
+app.patch("/api/admin/channels/:id", requireAuth, requireOwnerOrAdmin, async (req, res) => {
+  const channelId = Number(req.params.id);
+  if (!channelId) return fail(res, 400, "BAD_INPUT", "bad channel id");
+
+  const ch = await queryOne(`SELECT id, name, is_public, deleted_at FROM channels WHERE id=$1`, [channelId]);
+  if (!ch || ch.deleted_at) return fail(res, 404, "NOT_FOUND", "Channel not found");
+
+  const nextNameRaw = req.body.name !== undefined ? String(req.body.name || "") : null;
+  const nextName = nextNameRaw === null ? null : normalizeChannelName(nextNameRaw);
+  const nextIsPublic = (req.body.isPublic === undefined) ? null : Boolean(req.body.isPublic);
+
+  if (nextNameRaw !== null && !nextName) return fail(res, 400, "BAD_INPUT", "Bad channel name");
+
+  try {
+    const upd = await queryOne(
+      `UPDATE channels
+       SET name = COALESCE($2, name),
+           is_public = COALESCE($3, is_public)
+       WHERE id=$1
+       RETURNING id, name, is_public`,
+      [channelId, nextName, nextIsPublic]
+    );
+
+    if (nextName && nextName !== ch.name) {
+      await auditLog(req.user.id, "CHANNEL_RENAME", { channelId, oldName: ch.name, newName: upd.name, at: nowIso() });
+    }
+    if (nextIsPublic !== null && Boolean(nextIsPublic) !== Boolean(ch.is_public)) {
+      await auditLog(req.user.id, "CHANNEL_PRIVACY_CHANGE", { channelId, from: ch.is_public ? "public" : "private", to: upd.is_public ? "public" : "private", at: nowIso() });
+    }
+
+    broadcastAll({ type: "channel_updated", channelId });
+    broadcastAll({ type: "refresh_lists" });
+
+    ok(res, { channel: { id: Number(upd.id), name: upd.name, isPublic: upd.is_public } });
+  } catch (e) {
+    if (String(e.code) === "23505") return fail(res, 409, "CHANNEL_EXISTS", "Channel name already exists");
+    console.error(e);
+    return fail(res, 500, "SERVER_ERROR", "Failed to update channel");
+  }
+});
+
+app.delete("/api/admin/channels/:id", requireAuth, requireOwner, async (req, res) => {
+  const channelId = Number(req.params.id);
+  if (!channelId) return fail(res, 400, "BAD_INPUT", "bad channel id");
+
+  const ch = await queryOne(`SELECT id, name, deleted_at FROM channels WHERE id=$1`, [channelId]);
+  if (!ch || ch.deleted_at) return fail(res, 404, "NOT_FOUND", "Channel not found");
+
+  await pool.query(
+    `UPDATE channels
+     SET deleted_at = NOW(), deleted_by_user_id = $2
+     WHERE id=$1`,
+    [channelId, req.user.id]
+  );
+
+  await auditLog(req.user.id, "CHANNEL_DELETE", { channelId, name: ch.name, at: nowIso() });
+
+  broadcastAll({ type: "channel_deleted", channelId });
+  broadcastAll({ type: "refresh_lists" });
+
+  ok(res, {});
+});
+
 
 app.get("/api/admin/channels/:id/access", requireAuth, requireOwnerOrAdmin, async (req, res) => {
   const channelId = Number(req.params.id);
@@ -1329,9 +1781,12 @@ app.get("/api/admin/dm/chats/:id/messages", requireAuth, requireOwner, async (re
 
   const { rows } = await pool.query(
     `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
+            m.deleted_at, m.deleted_by_user_id, m.edited_at, m.edited_by_user_id,
+            m.edited_at, m.edited_by_user_id,
             u.id AS sender_id, u.display_name AS sender_name, u.email AS sender_email
      FROM dm_messages m
      JOIN users u ON u.id = m.sender_user_id
+     LEFT JOIN attachments a ON a.id = m.attachment_id
      WHERE m.chat_id=$1
      ORDER BY m.id ASC
      LIMIT 500`,
@@ -1350,6 +1805,10 @@ app.get("/api/admin/dm/chats/:id/messages", requireAuth, requireOwner, async (re
       id: Number(r.id),
       at: Number(r.at),
       text: r.text,
+    deletedAt: r.deleted_at ? r.deleted_at : null,
+    deletedByUserId: r.deleted_by_user_id ? Number(r.deleted_by_user_id) : null,
+    editedAt: r.edited_at ? r.edited_at : null,
+    editedByUserId: r.edited_by_user_id ? Number(r.edited_by_user_id) : null,
       fromId: Number(r.sender_id),
       from: r.sender_name,
       fromEmail: r.sender_email,
@@ -1382,9 +1841,13 @@ async function wsSendInit(ws) {
 async function loadChannelHistoryWithReads(channelId, limit = 200) {
   const { rows } = await pool.query(
     `SELECT m.id, m.text, EXTRACT(EPOCH FROM m.created_at)*1000 AS at,
-            u.display_name, u.id AS sender_id
+            m.deleted_at, m.deleted_by_user_id, m.edited_at, m.edited_by_user_id,
+            m.edited_at, m.edited_by_user_id,
+            u.display_name, u.id AS sender_id,
+            a.id AS attachment_id, a.file_name AS attachment_name, a.mime AS attachment_mime, a.size_bytes AS attachment_size
      FROM channel_messages m
      JOIN users u ON u.id = m.sender_user_id
+     LEFT JOIN attachments a ON a.id = m.attachment_id
      WHERE m.channel_id=$1
      ORDER BY m.id DESC
      LIMIT $2`,
@@ -1394,10 +1857,22 @@ async function loadChannelHistoryWithReads(channelId, limit = 200) {
   const messages = rows.reverse().map(r => ({
     id: Number(r.id),
     text: r.text,
+    deletedAt: r.deleted_at ? r.deleted_at : null,
+    deletedByUserId: r.deleted_by_user_id ? Number(r.deleted_by_user_id) : null,
+    editedAt: r.edited_at ? r.edited_at : null,
+    editedByUserId: r.edited_by_user_id ? Number(r.edited_by_user_id) : null,
     at: Number(r.at),
     from: r.display_name,
     fromId: Number(r.sender_id),
     read: { readCount: 0, total: 0 },
+    attachment: r.attachment_id ? {
+      id: Number(r.attachment_id),
+      name: r.attachment_name,
+      mime: r.attachment_mime,
+      size: Number(r.attachment_size || 0),
+      url: `/api/attachments/${Number(r.attachment_id)}`,
+      isImage: String(r.attachment_mime || "").startsWith("image/"),
+    } : null,
   }));
 
   if (!messages.length) return { messages, totalEligible: 0, lastMessageId: 0 };
@@ -1414,14 +1889,45 @@ async function loadChannelHistoryWithReads(channelId, limit = 200) {
   return { messages, totalEligible: batch.total || 0, lastMessageId };
 }
 
-async function saveChannelMessage(channelId, senderUserId, text) {
-  const row = await queryOne(
-    `INSERT INTO channel_messages (channel_id, sender_user_id, text)
-     VALUES ($1,$2,$3)
-     RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at`,
-    [channelId, senderUserId, text]
+
+async function assertAndBindAttachment(attachmentId, uploaderUserId, bind) {
+  if (!attachmentId) return null;
+  const a = await queryOne(
+    `SELECT id, uploader_user_id, bound_channel_id, bound_dm_chat_id, file_name, mime, size_bytes
+     FROM attachments
+     WHERE id=$1`,
+    [attachmentId]
   );
-  return { id: Number(row.id), at: Number(row.at) };
+  if (!a) return null;
+  if (Number(a.uploader_user_id) !== Number(uploaderUserId)) return null;
+  if (a.bound_channel_id || a.bound_dm_chat_id) return null;
+
+  if (bind.channelId) {
+    await pool.query(`UPDATE attachments SET bound_channel_id=$2 WHERE id=$1`, [attachmentId, bind.channelId]);
+  } else if (bind.dmChatId) {
+    await pool.query(`UPDATE attachments SET bound_dm_chat_id=$2 WHERE id=$1`, [attachmentId, bind.dmChatId]);
+  }
+  return {
+    id: Number(a.id),
+    name: a.file_name,
+    mime: a.mime,
+    size: Number(a.size_bytes),
+    url: `/api/attachments/${Number(a.id)}`,
+    isImage: String(a.mime || "").startsWith("image/"),
+  };
+}
+
+async function saveChannelMessage(channelId, senderUserId, text, attachmentId) {
+  // привязка вложения (если есть)
+  const att = await assertAndBindAttachment(Number(attachmentId || 0), senderUserId, { channelId });
+
+  const row = await queryOne(
+    `INSERT INTO channel_messages (channel_id, sender_user_id, text, attachment_id)
+     VALUES ($1,$2,$3,$4)
+     RETURNING id, EXTRACT(EPOCH FROM created_at)*1000 AS at, attachment_id`,
+    [channelId, senderUserId, text, att ? att.id : null]
+  );
+  return { id: Number(row.id), at: Number(row.at), attachment: att };
 }
 
 function broadcastToChannelId(channelId, obj) {
@@ -1430,6 +1936,52 @@ function broadcastToChannelId(channelId, obj) {
     if (c.readyState === 1 && c.channelId === channelId) c.send(payload);
   }
 }
+
+async function softDeleteChannelMessage(messageId, actorUserId) {
+  const row = await queryOne(
+    `UPDATE channel_messages
+     SET deleted_at = NOW(), deleted_by_user_id = $2
+     WHERE id=$1 AND sender_user_id=$2 AND deleted_at IS NULL
+     RETURNING id, channel_id`,
+    [messageId, actorUserId]
+  );
+  return row ? { id: Number(row.id), channelId: Number(row.channel_id) } : null;
+}
+
+async function softDeleteDmMessage(messageId, actorUserId) {
+  const row = await queryOne(
+    `UPDATE dm_messages
+     SET deleted_at = NOW(), deleted_by_user_id = $2
+     WHERE id=$1 AND sender_user_id=$2 AND deleted_at IS NULL
+     RETURNING id, chat_id`,
+    [messageId, actorUserId]
+  );
+  return row ? { id: Number(row.id), chatId: Number(row.chat_id) } : null;
+}
+
+
+async function softEditChannelMessage(messageId, actorUserId, newText) {
+  const row = await queryOne(
+    `UPDATE channel_messages
+     SET text = $3, edited_at = NOW(), edited_by_user_id = $2
+     WHERE id=$1 AND sender_user_id=$2 AND deleted_at IS NULL
+     RETURNING id, channel_id, text, EXTRACT(EPOCH FROM edited_at)*1000 AS edited_ms`,
+    [messageId, actorUserId, newText]
+  );
+  return row ? { id: Number(row.id), channelId: Number(row.channel_id), text: row.text, editedAtMs: Number(row.edited_ms) } : null;
+}
+
+async function softEditDmMessage(messageId, actorUserId, newText) {
+  const row = await queryOne(
+    `UPDATE dm_messages
+     SET text = $3, edited_at = NOW(), edited_by_user_id = $2
+     WHERE id=$1 AND sender_user_id=$2 AND deleted_at IS NULL
+     RETURNING id, chat_id, text, EXTRACT(EPOCH FROM edited_at)*1000 AS edited_ms`,
+    [messageId, actorUserId, newText]
+  );
+  return row ? { id: Number(row.id), chatId: Number(row.chat_id), text: row.text, editedAtMs: Number(row.edited_ms) } : null;
+}
+
 function broadcastToDmChatId(chatId, obj) {
   const payload = JSON.stringify(obj);
   for (const c of wss.clients) {
@@ -1509,7 +2061,8 @@ wss.on("connection", async (ws, req) => {
       const allowed = await canAccessChannel(ws.user, ws.channelId);
       if (!allowed) return;
 
-      const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000));
+      const attachmentId = Number(msg.attachmentId || 0);
+      const saved = await saveChannelMessage(ws.channelId, ws.user.id, text.slice(0, 2000), attachmentId);
 
       // sender read
       await upsertChannelRead(ws.channelId, ws.user.id, saved.id);
@@ -1524,6 +2077,7 @@ wss.on("connection", async (ws, req) => {
           from: ws.user.displayName,
           fromId: ws.user.id,
           text: text.slice(0, 2000),
+          attachment: saved.attachment || null,
           read: { readCount: prog.readCount, total: prog.total },
         }
       });
@@ -1581,6 +2135,7 @@ wss.on("connection", async (ws, req) => {
         await upsertDmRead(chatId, ws.user.id, lastId);
         const prog = await getDmReadProgress(chatId, lastId);
         broadcastToDmChatId(chatId, { type: "dm_read_progress", chatId, messageId: lastId, read: prog });
+        await broadcastDmReadBatch(chatId);
 
         // refresh list for unread
         sendToUser(ws.user.id, { type: "refresh_lists" });
@@ -1597,7 +2152,8 @@ wss.on("connection", async (ws, req) => {
       const allowed = await canAccessDmChat(ws.user.id, chatId);
       if (!allowed) return;
 
-      const saved = await saveDmMessage(chatId, ws.user.id, text.slice(0, 2000));
+      const attachmentId = Number(msg.attachmentId || 0);
+      const saved = await saveDmMessage(chatId, ws.user.id, text.slice(0, 2000), attachmentId);
       await upsertDmRead(chatId, ws.user.id, saved.id);
       const prog = await getDmReadProgress(chatId, saved.id);
 
@@ -1610,9 +2166,12 @@ wss.on("connection", async (ws, req) => {
           from: ws.user.displayName,
           fromId: ws.user.id,
           text: text.slice(0, 2000),
+          attachment: saved.attachment || null,
           read: prog,
         }
       });
+      await broadcastDmReadBatch(chatId);
+
 
       const participants = await getDmParticipants(chatId);
       for (const uid of participants) {
@@ -1633,9 +2192,94 @@ wss.on("connection", async (ws, req) => {
       const prog = await getDmReadProgress(chatId, lastReadMessageId);
 
       broadcastToDmChatId(chatId, { type: "dm_read_progress", chatId, messageId: lastReadMessageId, read: prog });
+      await broadcastDmReadBatch(chatId);
       sendToUser(ws.user.id, { type: "refresh_lists" });
       return;
     }
+
+    /* ===== Delete (soft) ===== */
+    if (msg.type === "delete" && typeof msg.messageId === "number") {
+      const messageId = Math.floor(msg.messageId);
+      if (!ws.channelId) return;
+
+      const deleted = await softDeleteChannelMessage(messageId, ws.user.id);
+      if (!deleted) return;
+
+      await safeAuditLog(ws.user.id, "MESSAGE_DELETE", { messageId, channelId: deleted.channelId, at: nowIso() });
+      broadcastToChannelId(deleted.channelId, { type: "message_deleted", channelId: deleted.channelId, messageId });
+      broadcastAll({ type: "channel_notice", channelId: deleted.channelId });
+      return;
+    }
+
+    if (msg.type === "dm_delete" && typeof msg.messageId === "number") {
+      const messageId = Math.floor(msg.messageId);
+      if (!ws.dmChatId) return;
+
+      const deleted = await softDeleteDmMessage(messageId, ws.user.id);
+      if (!deleted) return;
+
+      await safeAuditLog(ws.user.id, "DM_MESSAGE_DELETE", { messageId, chatId: deleted.chatId, at: nowIso() });
+      broadcastToDmChatId(deleted.chatId, { type: "dm_message_deleted", chatId: deleted.chatId, messageId });
+
+      const participants = await getDmParticipants(deleted.chatId);
+      for (const uid of participants) {
+        sendToUser(uid, { type: "dm_notice", chatId: deleted.chatId });
+        sendToUser(uid, { type: "refresh_lists" });
+      }
+      return;
+    }
+
+    /* ===== Edit ===== */
+    if (msg.type === "edit" && typeof msg.messageId === "number" && typeof msg.text === "string") {
+      const messageId = Math.floor(msg.messageId);
+      const newText = msg.text.trim().slice(0, 2000);
+      if (!newText) return;
+      if (!ws.channelId) return;
+
+      const edited = await softEditChannelMessage(messageId, ws.user.id, newText);
+      if (!edited) return;
+
+      await safeAuditLog(ws.user.id, "MESSAGE_EDIT", { messageId, channelId: edited.channelId, at: nowIso() });
+
+      broadcastToChannelId(edited.channelId, {
+        type: "message_edited",
+        channelId: edited.channelId,
+        messageId,
+        text: edited.text,
+        editedAt: edited.editedAtMs
+      });
+      broadcastAll({ type: "channel_notice", channelId: edited.channelId });
+      return;
+    }
+
+    if (msg.type === "dm_edit" && typeof msg.messageId === "number" && typeof msg.text === "string") {
+      const messageId = Math.floor(msg.messageId);
+      const newText = msg.text.trim().slice(0, 2000);
+      if (!newText) return;
+      if (!ws.dmChatId) return;
+
+      const edited = await softEditDmMessage(messageId, ws.user.id, newText);
+      if (!edited) return;
+
+      await safeAuditLog(ws.user.id, "DM_MESSAGE_EDIT", { messageId, chatId: edited.chatId, at: nowIso() });
+
+      broadcastToDmChatId(edited.chatId, {
+        type: "dm_message_edited",
+        chatId: edited.chatId,
+        messageId,
+        text: edited.text,
+        editedAt: edited.editedAtMs
+      });
+
+      const participants = await getDmParticipants(edited.chatId);
+      for (const uid of participants) {
+        sendToUser(uid, { type: "dm_notice", chatId: edited.chatId });
+        sendToUser(uid, { type: "refresh_lists" });
+      }
+      return;
+    }
+
+
   });
 });
 

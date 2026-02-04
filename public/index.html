@@ -4,1290 +4,392 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Corp Chat Template</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:#0b1220; color:#e6edf3; }
-    .app { display:flex; height:100vh; }
-    .side { width:360px; padding:12px; border-right:1px solid #1f2a44; background:#0a1020; box-sizing:border-box; overflow:auto; }
-    .main { flex:1; display:flex; flex-direction:column; padding:12px; box-sizing:border-box; }
-    .card { background:#111a2e; border:1px solid #1f2a44; border-radius:12px; padding:10px; }
-    .row { display:flex; gap:10px; margin-top:10px; }
-    input, select, button { border-radius:10px; border:1px solid #2a3a63; background:#0b1220; color:#e6edf3; padding:10px; }
-    input, select { width:100%; box-sizing:border-box; }
-    button { cursor:pointer; white-space:nowrap; }
-    button:disabled { opacity:.6; cursor:not-allowed; }
-    .muted { opacity:.75; font-size:12px; }
-    .list { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
-
-    .item {
-      padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a;
-      cursor:pointer; user-select:none;
-      display:flex; align-items:center; justify-content:space-between; gap:10px;
-    }
-    .item:hover { filter:brightness(1.08); }
-    .item.active { outline:2px solid #1f6feb; background:#0b1b3a; }
-
-    .leftline { display:flex; align-items:center; gap:8px; min-width:0; }
-    .truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .badge {
-      display:inline-flex; align-items:center; justify-content:center;
-      min-width:22px; height:18px; padding:0 6px;
-      border-radius:999px; border:1px solid #2a3a63;
-      background:#0b1220; font-size:12px; opacity:.95;
-    }
-
-    #log { flex:1; overflow:auto; padding:12px; background:#0f172a; border-radius:12px; border:1px solid #1f2a44; margin-top:10px; }
-    .msg { margin:10px 0; }
-    .meta { opacity:.75; font-size:12px; display:flex; justify-content:space-between; gap:10px; align-items:center; }
-    .bubble { display:inline-block; padding:10px 12px; border-radius:12px; background:#1b243b; white-space:pre-wrap; max-width:100%; }
-    .receipt { opacity:.8; font-size:12px; margin-left:10px; min-width:56px; text-align:right; }
-    .receipt.dim { opacity:.35; }
-
-    .dot { width:8px; height:8px; border-radius:999px; display:inline-block; vertical-align:middle; border:1px solid #2a3a63; }
-    .dot.on { background:#22c55e; }
-    .dot.off { background:#0b1220; }
-
-    .tabs { display:flex; gap:8px; margin-top:10px; overflow-x:auto; padding-bottom:6px; scrollbar-width: thin; }
-    .tab { flex:0 0 auto; padding:8px 10px; border-radius:10px; border:1px solid #1f2a44; background:#0f172a; cursor:pointer; user-select:none; }
-    .tab.active { outline:2px solid #1f6feb; background:#0b1b3a; }
-    .hidden { display:none !important; }
-    .hr { height:1px; background:#1f2a44; margin:10px 0; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; font-size:12px; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2a3a63; background:#0b1220; font-size:12px; opacity:.9; }
-    .danger { border-color:#7f1d1d !important; }
-
-    #adminCard { max-height: 72vh; overflow:auto; }
-    .small { font-size: 12px; opacity:.85; }
-  </style>
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<div class="app">
-  <div class="side">
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
-        <div>
-          <div><b id="brand">Corp Chat</b></div>
-          <div class="muted" id="status">Проверка сессии…</div>
-        </div>
-        <button id="logoutBtn" class="hidden">Выйти</button>
-      </div>
 
-      <div id="authBox" class="row" style="flex-direction:column;">
-        <div class="tabs">
-          <div id="tabLogin" class="tab active">Вход</div>
-          <div id="tabRegister" class="tab">Регистрация</div>
-        </div>
-
-        <div id="loginForm">
-          <div class="row" style="margin-top:0;">
-            <input id="loginEmail" placeholder="Email" />
-          </div>
-          <div class="row">
-            <input id="loginPass" placeholder="Пароль" type="password" />
-          </div>
-          <div class="row">
-            <button id="loginBtn">Войти</button>
-          </div>
-          <div class="muted" id="loginMsg"></div>
-        </div>
-
-        <div id="registerForm" class="hidden">
-          <div class="row" style="margin-top:0;">
-            <input id="regName" placeholder="Имя (как будет видно в чате)" />
-          </div>
-          <div class="row">
-            <input id="regEmail" placeholder="Email" />
-          </div>
-          <div class="row">
-            <input id="regPass" placeholder="Пароль (мин 6 символов)" type="password" />
-          </div>
-          <div class="row">
-            <input id="regInvite" placeholder="Инвайт-код (обязателен)" />
-          </div>
-          <div class="row">
-            <select id="regPosition"></select>
-          </div>
-          <div class="row">
-            <button id="registerBtn">Зарегистрироваться</button>
-          </div>
-          <div class="muted" id="registerMsg"></div>
-        </div>
-      </div>
-
-      <div id="meBox" class="hidden" style="margin-top:10px;">
-        <div><b id="meName"></b> <span class="pill" id="meRole"></span></div>
-        <div class="muted" id="meEmail"></div>
-      </div>
+<!-- Login Screen -->
+<div id="loginScreen" class="login-screen hidden screen is-hidden">
+  <div class="login-card">
+    <div class="logo-container">
+      <img src="/logo.png" alt="anrex" class="login-logo">
+      <div class="muted" style="margin-top:5px; font-size:12px;">Нужно войти</div>
     </div>
 
-    <div id="channelsCard" class="card hidden" style="margin-top:10px;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <b>Каналы</b>
-        <button id="openAdminBtn" class="hidden">Админка</button>
-      </div>
-      <div class="list" id="channels"></div>
-      <div class="muted">В списке только доступные тебе каналы</div>
+    <div class="tabs" style="justify-content:center; margin-bottom:20px;">
+      <div id="tabLogin" class="tab active">Вход</div>
+      <div id="tabRegister" class="tab">Регистрация</div>
     </div>
 
-    <div id="dmCard" class="card hidden" style="margin-top:10px;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <b>Личные</b>
-        <button id="newDmBtn">Новый DM</button>
+    <div id="loginForm">
+      <div class="row" style="margin-top:0;">
+        <input id="loginEmail" placeholder="Email" />
       </div>
       <div class="row">
-        <select id="dmUserSelect" class="hidden"></select>
-        <button id="dmOpenBtn" class="hidden">Открыть</button>
+        <input id="loginPass" placeholder="Пароль" type="password" />
       </div>
-      <div class="list" id="dmList"></div>
-      <div class="muted">DM доступны только между пользователями этого сервера</div>
+      <div style="margin-top:20px;" class="row">
+        <button id="loginBtn" class="primary-btn" style="display:block; margin:0 auto;">Войти</button>
+      </div>
+      <div class="muted" id="loginMsg" style="text-align:center; margin-top:10px;"></div>
     </div>
 
-    <!-- Админка (как раньше) -->
-    <div id="adminCard" class="card hidden" style="margin-top:10px;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <b>Админка</b>
-        <button id="closeAdminBtn">Закрыть</button>
+    <div id="registerForm" class="hidden">
+      <div class="row" style="margin-top:0;">
+        <input id="regName" placeholder="Имя (как будет видно в чате)" />
       </div>
-
-      <div class="tabs">
-        <div class="tab active" data-admin-tab="roles">Роли</div>
-        <div class="tab" data-admin-tab="users">Пользователи</div>
-        <div class="tab" data-admin-tab="channels">Каналы</div>
-        <div class="tab" data-admin-tab="audit">Аудит</div>
-        <div class="tab" data-admin-tab="dms">DM аудит</div>
-        <div class="tab" data-admin-tab="invites">Инвайты</div>
+      <div class="row">
+        <input id="regEmail" placeholder="Email" />
       </div>
-
-      <div id="adminRoles">
-        <div class="muted">Кастомные роли (должности).</div>
-        <div class="row">
-          <input id="newRoleName" placeholder="role-slug (например sales-manager)" />
-        </div>
-        <div class="row">
-          <input id="newRoleDisplay" placeholder="Отображаемое имя (например Менеджер)" />
-          <button id="createRoleBtn">Создать</button>
-        </div>
-        <div class="hr"></div>
-        <div id="rolesList" class="muted"></div>
+      <div class="row">
+        <input id="regPass" placeholder="Пароль (мин 6 символов)" type="password" />
       </div>
-
-      <div id="adminUsers" class="hidden">
-        <div class="muted">Выдавай и снимай роли.</div>
-        <div class="hr"></div>
-        <div id="usersList"></div>
+      <div class="row">
+        <input id="regInvite" placeholder="Инвайт-код (обязателен)" />
       </div>
+      <div class="row">
+        <select id="regPosition"></select>
+      </div>
+      <div class="row">
+        <button id="registerBtn" class="primary-btn" style="width:100%">Зарегистрироваться</button>
+      </div>
+      <div class="muted" id="registerMsg" style="text-align:center; margin-top:10px;"></div>
+    </div>
+  </div>
+</div>
 
-      <div id="adminChannels" class="hidden">
-        <div class="muted">Каналы и доступ.</div>
-        <div class="row">
-          <input id="newChannelName" placeholder="channel-name" />
-        </div>
-        <div class="row">
-          <select id="newChannelPublic">
-            <option value="true">Публичный (всем)</option>
-            <option value="false">Приватный (по доступу)</option>
-          </select>
-          <button id="createChannelBtn">Создать канал</button>
-        </div>
-
-        <div class="hr"></div>
-
-        <div class="muted">Настройка доступа:</div>
-        <div class="row">
-          <select id="accessChannel"></select>
-          <button id="loadAccessBtn">Загрузить доступ</button>
-        </div>
-
-        <div class="row">
-          <div style="flex:1">
-            <div class="muted">Роли с доступом</div>
-            <div id="accessRoles"></div>
-          </div>
-          <div style="flex:1">
-            <div class="muted">Пользователи с доступом</div>
-            <div id="accessUsers"></div>
+<!-- Main App Interface -->
+<div id="appInterface" class="app hidden screen is-hidden">
+  <div class="side">
+    <div class="sidebar-top">
+      <div class="sidebar-brand">
+        <div class="sidebar-brand-left">
+          <img src="/logo.png" alt="logo" class="chat-logo">
+          <div class="sidebar-brand-text">
+            <div class="muted" id="status">Проверка сессии…</div>
           </div>
         </div>
-
-        <div class="row">
-          <button id="saveAccessBtn">Сохранить доступ</button>
-        </div>
-        <div class="muted" id="accessMsg"></div>
       </div>
 
-      <div id="adminAudit" class="hidden">
-        <div class="muted">Журнал действий (OWNER/SUPERADMIN).</div>
-        <div class="hr"></div>
-        <div id="auditList" class="muted"></div>
+      <div class="tabs sidebar-modes" id="sidebarModes">
+        <div id="sidebarModeWork" class="tab active" data-sidebar-mode="work">
+          <span class="tab-icon" aria-hidden="true">
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-briefcase-business-icon lucide-briefcase-business"><path d="M12 12h.01"/><path d="M16 6V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><path d="M22 13a18.15 18.15 0 0 1-20 0"/><rect width="20" height="14" x="2" y="6" rx="2"/></svg>
+          </span>
+          <span class="tab-label">Работа</span>
+        </div>
+        <div id="sidebarModePersonal" class="tab" data-sidebar-mode="personal">
+          <span class="tab-icon" aria-hidden="true">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-message-circle-icon lucide-message-circle"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/></svg>
+          </span>
+          <span class="tab-label">Личное</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-scroll">
+      <div id="channelsCard" class="sidebar-section">
+        <div class="sidebar-section-header">
+          <div style="margin-top:5px;" class="sidebar-section-title">Каналы</div>
+          
+        </div>
+        <div class="row sidebar-search-row">
+          <input id="channelsSearch" class="search" placeholder="Поиск канала…" />
+        </div>
+        <div class="list" id="channels"></div>
+        <div class="muted sidebar-section-hint">В списке только доступные тебе каналы</div>
       </div>
 
-      <div id="adminDms" class="hidden">
-        <div class="muted">Просмотр личных сообщений (OWNER/SUPERADMIN). Каждый просмотр логируется в аудит.</div>
-        <div class="hr"></div>
-        <div class="row">
-          <select id="dmAuditSelect"></select>
-          <button id="dmAuditLoadBtn">Открыть</button>
+      <div id="peopleCard" class="sidebar-section">
+        <div class="sidebar-section-header">
+          <div class="sidebar-section-title">Сотрудники</div>
+          <button id="refreshPeopleBtn" class="icon-btn" aria-label="Обновить сотрудников" title="Обновить">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-refresh-ccw-icon lucide-refresh-ccw"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+          </button>
         </div>
-        <div id="dmAuditLog" class="small"></div>
-        <div class="hr"></div>
-        <div id="dmAuditMessages"></div>
+        <div class="row sidebar-search-row">
+          <input id="peopleSearch" class="search" placeholder="Поиск по имени/email…" />
+        </div>
+        <div class="list" id="peopleList"></div>
+        <div class="muted sidebar-section-hint">Нажми на сотрудника — откроется DM</div>
       </div>
 
-      <div id="adminInvites" class="hidden">
-        <div class="muted">Инвайты для регистрации (ADMIN/OWNER). Регистрация без инвайта доступна только первому пользователю (OWNER).</div>
-        <div class="hr"></div>
-
-        <div class="row">
-          <input id="inviteMaxUses" placeholder="Макс. использований (например 1)" />
-          <input id="inviteExpiresHours" placeholder="Срок (часов, 0 = без срока)" />
-          <button id="inviteCreateBtn">Создать инвайт</button>
+      <div id="dmCard" class="sidebar-section">
+        <div class="sidebar-section-header">
+          <div class="sidebar-section-title">Личные сообщения</div>
+          <button id="newDmBtn" class="icon-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-message-circle-plus-icon lucide-message-circle-plus"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
+          </button>
         </div>
-        <div class="row" style="flex-wrap:wrap; gap:8px;">
-          <button id="inviteQuick1">Быстрый: 1 раз</button>
-          <button id="inviteQuick24">Быстрый: 1 раз / 24ч</button>
-          <button id="inviteQuick10">Быстрый: 10 раз</button>
+        <div class="row sidebar-search-row">
+          <input id="dmSearch" class="search" placeholder="Поиск по имени/email…" />
         </div>
-        <div class="muted" id="inviteMsg"></div>
-
-        <div class="hr"></div>
-        <div id="invitesList" class="small"></div>
+        <div class="row hidden" id="dmPickerRow">
+          <div class="multi-picker">
+            <input id="dmUserPickInput" class="multi-picker-input" type="text" readonly value="Выбери пользователя…" />
+            <div id="dmUserPickMenu" class="multi-picker-menu hidden">
+              <div class="multi-picker-search-wrap">
+                <input id="dmUserPickSearch" class="multi-picker-search" placeholder="Поиск пользователя…" />
+              </div>
+              <div id="dmUserPickList" class="multi-picker-list"></div>
+            </div>
+          </div>
+          <select id="dmUserSelect" class="hidden"></select>
+          <button style="margin-bottom:10px;" id="dmOpenBtn">Открыть</button>
+        </div>
+        <div class="list" id="dmList"></div>
+        <div class="muted sidebar-section-hint">DM доступны только между пользователями этого сервера</div>
       </div>
+    </div>
 
+    <div class="sidebar-footer">
+      <div id="meBox" class="hidden">
+        <div class="sidebar-me">
+          <div class="sidebar-me-text">
+            <div><b id="meName"></b> <span class="pill" id="meRole"></span></div>
+            <div class="muted" id="meEmail"></div>
+          </div>
+          <div style="display:flex; gap:10px;">
+          <button id="openAdminBtn" class="hidden icon-btn" aria-label="Админка" title="Админка">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-settings2-icon lucide-settings-2"><path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+          </button>
+          <button id="logoutBtn" class="hidden icon-btn" aria-label="Выйти" title="Выйти">
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-log-out-icon lucide-log-out"><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
+          </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
   <div class="main">
     <div class="card">
-      <div><b id="title">—</b></div>
-      <div class="muted" id="hint">Сначала войди/зарегистрируйся</div>
+      <div class="chat-header">
+        <button id="mobileBackBtn" class="icon-btn chat-back-btn" aria-label="Назад" title="Назад">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-left-icon lucide-arrow-left">
+            <path d="m12 19-7-7 7-7"/>
+            <path d="M19 12H5"/>
+          </svg>
+        </button>
+        <div class="chat-header-text">
+          <div><b id="title">—</b></div>
+          <div class="muted" id="hint">Сначала войди/зарегистрируйся</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="attachPreview" class="card hidden" style="margin-top:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+        <div class="truncate" id="attachPreviewText"></div>
+        <button id="attachRemoveBtn" class="danger">Убрать</button>
+      </div>
     </div>
 
     <div id="log"></div>
 
     <div class="row">
       <input id="text" placeholder="Написать сообщение…" maxlength="2000" disabled />
-      <button id="send" disabled>Отправить</button>
+      <input id="file" type="file" class="hidden" />
+      <button id="fileBtn" disabled>
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-paperclip-icon lucide-paperclip"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg>
+      </button>
+      <button id="send" disabled>
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-send-icon lucide-send"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="right-sidebar hidden"></div>
+</div>
+
+<!-- Admin Modal -->
+<div id="adminModal" class="modal-overlay hidden is-hidden">
+  <div class="modal-content">
+    
+    <!-- Left Sidebar -->
+    <div class="modal-sidebar">
+      <div class="tabs">
+        <div class="tab active" data-admin-tab="roles">Роли</div>
+        <div class="tab" data-admin-tab="users">Пользователи</div>
+        <div class="tab" data-admin-tab="channels">Каналы</div>
+        <div class="tab" data-admin-tab="audit">Аудит</div>
+        <div class="tab" data-admin-tab="dms">DM аудит</div>
+        <div class="tab hidden" id="adminSettingsTab" data-admin-tab="settings">Настройки</div>
+        <div class="tab" data-admin-tab="invites">Инвайты</div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="modal-main">
+      <div class="modal-header-right">
+        <h2>Админ-панель</h2>
+        <button style="border:none; background:transparent;" id="closeAdminBtn" class="modal-close-btn">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x-icon lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="modal-body-content">
+        
+        <div id="adminRoles">
+          <div class="muted">Кастомные роли (должности).</div>
+          <div class="row">
+            <input id="newRoleName" placeholder="role-slug (например sales-manager)" />
+          </div>
+          <div class="row">
+            <input id="newRoleDisplay" placeholder="Отображаемое имя (например Менеджер)" />
+            <button id="createRoleBtn" class="primary">Создать</button>
+          </div>
+          <div class="hr"></div>
+          <div id="rolesList" class="muted"></div>
+        </div>
+
+        <div id="adminUsers" class="hidden">
+          <div class="muted">Выдавай и снимай роли.</div>
+          <div style="margin-top:12px;">
+            <div class="muted">Сотрудник</div>
+            <div class="multi-picker">
+              <input id="adminUserPickInput" class="multi-picker-input" type="text" readonly value="Выбери сотрудника…" />
+              <div id="adminUserPickMenu" class="multi-picker-menu hidden">
+                <div class="multi-picker-search-wrap">
+                  <input id="adminUserPickSearch" class="multi-picker-search" placeholder="Поиск сотрудника…" />
+                </div>
+                <div id="adminUserPickList" class="multi-picker-list"></div>
+              </div>
+            </div>
+          </div>
+          <div class="hr"></div>
+          <div id="usersList"></div>
+        </div>
+
+        <div id="adminChannels" class="hidden">
+          <div class="muted" style="margin-bottom:10px;">Управление каналами</div>
+          
+          <!-- Create Channel Section -->
+          <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 5px;">
+             <div class="muted" style="margin-bottom:5px;">Создать новый канал:</div>
+             <div class="row" style="margin-top:0;">
+                <input id="newChannelName" placeholder="channel-name" />
+                <select id="newChannelPublic" style="width:auto;">
+                  <option value="true">Публичный</option>
+                  <option value="false">Приватный</option>
+                </select>
+                <button id="createChannelBtn" class="primary">Создать</button>
+             </div>
+          </div>
+
+          <div class="hr"></div>
+
+          <!-- Edit Channel Selector -->
+           <div class="muted" style="margin-bottom:5px;">Редактирование канала:</div>
+           <div class="row" style="margin-top:0;">
+             <select id="accessChannel" style="padding: 12px; font-size: 16px;"></select>
+             <button id="loadAccessBtn" class="hidden">Обновить</button> <!-- Hidden as onchange handles it usually -->
+           </div>
+
+          <div style="margin-top: 20px; border: 1px solid #4f545c; padding: 15px; border-radius: 5px;">
+            <div class="muted">Свойства выбранного канала:</div>
+            <div class="row">
+              <input id="editChannelName" placeholder="Название канала" />
+            </div>
+            <div class="row">
+              <select id="editChannelPrivacy">
+                <option value="true">Публичный (всем)</option>
+                <option value="false">Приватный (по доступу)</option>
+              </select>
+              <button id="saveChannelPropsBtn" class="primary">Сохранить</button>
+              <button id="deleteChannelBtn" class="danger">Удалить</button>
+            </div>
+            <div class="muted" id="channelPropsMsg" style="margin-top:5px;"></div>
+          </div>
+
+          <div class="hr"></div>
+
+          <div class="muted">Настройка доступа (для приватных каналов):</div>
+          
+          <div style="margin-top:15px;">
+            <div class="muted">Роли с доступом</div>
+            <div class="multi-picker">
+              <input id="accessRolesInput" class="multi-picker-input" type="text" readonly value="Выбрано: 0" />
+              <div id="accessRolesMenu" class="multi-picker-menu hidden">
+                <div class="multi-picker-search-wrap">
+                  <input id="accessRolesSearch" class="multi-picker-search" placeholder="Поиск роли…" />
+                </div>
+                <div id="accessRoles" class="multi-picker-list"></div>
+              </div>
+            </div>
+          </div>
+          
+          <div style="margin-top:20px;">
+            <div class="muted">Пользователи с доступом</div>
+            <div class="multi-picker">
+              <input id="accessUsersInput" class="multi-picker-input" type="text" readonly value="Выбрано: 0" />
+              <div id="accessUsersMenu" class="multi-picker-menu hidden">
+                <div class="multi-picker-search-wrap">
+                  <input id="accessUsersSearch" class="multi-picker-search" placeholder="Поиск пользователя…" />
+                </div>
+                <div id="accessUsers" class="multi-picker-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:20px;">
+            <button id="saveAccessBtn" class="primary">Сохранить доступ</button>
+          </div>
+          <div class="muted" id="accessMsg" style="margin-top:5px;"></div>
+        </div>
+
+        <div id="adminAudit" class="hidden">
+          <div class="muted">Журнал действий (OWNER/SUPERADMIN).</div>
+          <div class="hr"></div>
+          <div id="auditList" class="muted"></div>
+        </div>
+
+        <div id="adminSettings" class="hidden">
+          <div class="muted">Настройки загрузок (только SUPERADMIN).</div>
+          <div class="hr"></div>
+          <div class="row">
+            <input id="maxFileMb" placeholder="Макс. размер файла (MB)" />
+            <button id="saveMaxFileBtn" class="primary">Сохранить</button>
+          </div>
+          <div class="muted" id="settingsMsg"></div>
+        </div>
+
+        <div id="adminDms" class="hidden">
+          <div class="muted">Просмотр личных сообщений (OWNER/SUPERADMIN). Каждый просмотр логируется в аудит.</div>
+          <div class="hr"></div>
+          <div class="row">
+            <select id="dmAuditSelect"></select>
+            <button id="dmAuditLoadBtn" class="primary">Открыть</button>
+          </div>
+          <div id="dmAuditLog" class="small" style="margin-top:10px;"></div>
+          <div class="hr"></div>
+          <div id="dmAuditMessages"></div>
+        </div>
+
+        <div id="adminInvites" class="hidden">
+          <div class="muted">Инвайты для регистрации (ADMIN/OWNER). Регистрация без инвайта доступна только первому пользователю (OWNER).</div>
+          <div class="hr"></div>
+
+          <div class="row">
+            <input id="inviteMaxUses" placeholder="Макс. использований (например 1)" />
+            <input id="inviteExpiresHours" placeholder="Срок (часов, 0 = без срока)" />
+            <button id="inviteCreateBtn" class="primary">Создать инвайт</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:8px;">
+            <button id="inviteQuick1">Быстрый: 1 раз</button>
+            <button id="inviteQuick24">Быстрый: 1 раз / 24ч</button>
+            <button id="inviteQuick10">Быстрый: 10 раз</button>
+          </div>
+          <div class="muted" id="inviteMsg" style="margin-top:10px;"></div>
+
+          <div class="hr"></div>
+          <div id="invitesList" class="small"></div>
+        </div>
+        
+      </div>
     </div>
   </div>
 </div>
-
-<script>
-  const statusEl = document.getElementById("status");
-  const authBox = document.getElementById("authBox");
-  const meBox = document.getElementById("meBox");
-  const meNameEl = document.getElementById("meName");
-  const meEmailEl = document.getElementById("meEmail");
-  const meRoleEl = document.getElementById("meRole");
-  const logoutBtn = document.getElementById("logoutBtn");
-
-  const tabLogin = document.getElementById("tabLogin");
-  const tabRegister = document.getElementById("tabRegister");
-  const loginForm = document.getElementById("loginForm");
-  const registerForm = document.getElementById("registerForm");
-
-  const loginEmail = document.getElementById("loginEmail");
-  const loginPass = document.getElementById("loginPass");
-  const loginBtn = document.getElementById("loginBtn");
-  const loginMsg = document.getElementById("loginMsg");
-
-  const regName = document.getElementById("regName");
-  const regEmail = document.getElementById("regEmail");
-  const regPass = document.getElementById("regPass");
-  const regInvite = document.getElementById("regInvite");
-  const regPosition = document.getElementById("regPosition");
-  const registerBtn = document.getElementById("registerBtn");
-  const registerMsg = document.getElementById("registerMsg");
-
-  const channelsCard = document.getElementById("channelsCard");
-  const channelsEl = document.getElementById("channels");
-
-  const dmCard = document.getElementById("dmCard");
-  const dmListEl = document.getElementById("dmList");
-  const newDmBtn = document.getElementById("newDmBtn");
-  const dmUserSelect = document.getElementById("dmUserSelect");
-  const dmOpenBtn = document.getElementById("dmOpenBtn");
-
-  const titleEl = document.getElementById("title");
-  const hintEl = document.getElementById("hint");
-
-  const log = document.getElementById("log");
-  const text = document.getElementById("text");
-  const sendBtn = document.getElementById("send");
-
-  const openAdminBtn = document.getElementById("openAdminBtn");
-  const adminCard = document.getElementById("adminCard");
-  const closeAdminBtn = document.getElementById("closeAdminBtn");
-
-  // admin
-  const rolesList = document.getElementById("rolesList");
-  const usersList = document.getElementById("usersList");
-  const auditList = document.getElementById("auditList");
-  const newRoleName = document.getElementById("newRoleName");
-  const newRoleDisplay = document.getElementById("newRoleDisplay");
-  const createRoleBtn = document.getElementById("createRoleBtn");
-  const newChannelName = document.getElementById("newChannelName");
-  const newChannelPublic = document.getElementById("newChannelPublic");
-  const createChannelBtn = document.getElementById("createChannelBtn");
-  const accessChannel = document.getElementById("accessChannel");
-  const loadAccessBtn = document.getElementById("loadAccessBtn");
-  const accessRoles = document.getElementById("accessRoles");
-  const accessUsers = document.getElementById("accessUsers");
-  const saveAccessBtn = document.getElementById("saveAccessBtn");
-  const accessMsg = document.getElementById("accessMsg");
-
-  // admin DM audit
-  const dmAuditSelect = document.getElementById("dmAuditSelect");
-  const dmAuditLoadBtn = document.getElementById("dmAuditLoadBtn");
-  const dmAuditLog = document.getElementById("dmAuditLog");
-  const dmAuditMessages = document.getElementById("dmAuditMessages");
-
-  // admin invites
-  const inviteMaxUses = document.getElementById("inviteMaxUses");
-  const inviteExpiresHours = document.getElementById("inviteExpiresHours");
-  const inviteCreateBtn = document.getElementById("inviteCreateBtn");
-  const inviteMsg = document.getElementById("inviteMsg");
-  const invitesList = document.getElementById("invitesList");
-  const inviteQuick1 = document.getElementById("inviteQuick1");
-  const inviteQuick24 = document.getElementById("inviteQuick24");
-  const inviteQuick10 = document.getElementById("inviteQuick10");
-
-  const adminTabs = [...document.querySelectorAll("[data-admin-tab]")];
-  const adminViews = {
-    roles: document.getElementById("adminRoles"),
-    users: document.getElementById("adminUsers"),
-    channels: document.getElementById("adminChannels"),
-    audit: document.getElementById("adminAudit"),
-    dms: document.getElementById("adminDms"),
-    invites: document.getElementById("adminInvites"),
-  };
-
-  let me = null;
-  let ws = null;
-
-  let hasInviteParam = false;
-
-  let channels = [];             // {id,name,isPublic,unreadCount,lastMessageId}
-  let dmChats = [];              // {id,otherUser,unreadCount,lastMessageId,last...}
-
-  let activeMode = "channel";    // channel | dm
-  let activeChannelId = null;
-  let activeDmChatId = null;
-  let activeDmOther = null;
-
-  let roles = [];
-  let users = [];
-  let adminAllChannels = [];
-
-  // presence + receipts
-  let onlineUserIds = new Set();
-  // messageId -> {readCount,total}
-  let receiptByMessageId = new Map();
-  // messageId -> fromId (нужно чтобы показывать receipt только для твоих)
-  let messageFromId = new Map();
-
-  function updateHeaderStatus() {
-    // Канал: показываем сколько пользователей онлайн в целом (на сервере)
-    if (activeMode === "channel") {
-      if (activeChannelId) {
-        hintEl.textContent = `онлайн: ${onlineUserIds.size}`;
-      }
-      return;
-    }
-    // DM: показываем онлайн/оффлайн собеседника
-    if (activeMode === "dm") {
-      if (activeDmOther && activeDmOther.id) {
-        const isOn = onlineUserIds.has(Number(activeDmOther.id));
-        hintEl.textContent = isOn ? "в сети" : "не в сети";
-      }
-      return;
-    }
-    // default
-    // hintEl.textContent stays as is
-  }
-
-  function esc(s) {
-    return String(s || "").replace(/[&<>"']/g, c => ({
-      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
-    }[c]));
-  }
-
-  async function api(path, opts) {
-    const res = await fetch(path, { credentials: "include", ...opts });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) throw new Error(data.message || data.code || "Request failed");
-    return data;
-  }
-
-  function dotHtml(isOn) {
-    return `<span class="dot ${isOn ? "on" : "off"}"></span>`;
-  }
-
-  function badgeHtml(n) {
-    if (!n || n <= 0) return "";
-    return `<span class="badge">${n > 99 ? "99+" : n}</span>`;
-  }
-
-  async function createInviteAndCopy(maxUses, expiresInHours) {
-    inviteMsg.textContent = "";
-    inviteCreateBtn.disabled = true;
-    try {
-      const resp = await api("/api/admin/invites", {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ maxUses, expiresInHours })
-      });
-      const token = resp.invite?.token;
-      if (!token) throw new Error("Не удалось создать инвайт");
-      const link = `${location.origin}/?invite=${token}`;
-
-      try {
-        await navigator.clipboard.writeText(link);
-        inviteMsg.textContent = "✅ Инвайт создан и ссылка скопирована";
-      } catch {
-        inviteMsg.textContent = "✅ Инвайт создан. Скопируй ссылку: " + link;
-      }
-
-      await refreshAdmin();
-    } catch (e) {
-      inviteMsg.textContent = "❌ " + String(e.message || e);
-    } finally {
-      inviteCreateBtn.disabled = false;
-    }
-  }
-
-
-  function setAuthMode(mode) {
-    if (!hasInviteParam && mode === "register") {
-      // регистрация только по инвайту (ссылка вида ?invite=...)
-      return;
-    }
-    if (mode === "login") {
-      tabLogin.classList.add("active");
-      tabRegister.classList.remove("active");
-      loginForm.classList.remove("hidden");
-      registerForm.classList.add("hidden");
-    } else {
-      tabRegister.classList.add("active");
-      tabLogin.classList.remove("active");
-      registerForm.classList.remove("hidden");
-      loginForm.classList.add("hidden");
-    }
-  }
-  tabLogin.onclick = () => setAuthMode("login");
-  tabRegister.onclick = () => setAuthMode("register");
-
-  function uiLoggedOut() {
-    me = null;
-    authBox.classList.remove("hidden");
-    meBox.classList.add("hidden");
-    logoutBtn.classList.add("hidden");
-    channelsCard.classList.add("hidden");
-    dmCard.classList.add("hidden");
-    adminCard.classList.add("hidden");
-    openAdminBtn.classList.add("hidden");
-
-    titleEl.textContent = "—";
-    hintEl.textContent = "Сначала войди/зарегистрируйся";
-    text.disabled = true;
-    sendBtn.disabled = true;
-    log.innerHTML = "";
-
-    onlineUserIds = new Set();
-    receiptByMessageId = new Map();
-    messageFromId = new Map();
-    activeMode = "channel";
-    activeChannelId = null;
-    activeDmChatId = null;
-
-    if (ws) { try { ws.close(); } catch {} }
-    ws = null;
-
-    // регистрация только по инвайту
-    tabRegister.classList.toggle("hidden", !hasInviteParam);
-
-  }
-
-  function uiLoggedIn() {
-    authBox.classList.add("hidden");
-    meBox.classList.remove("hidden");
-    logoutBtn.classList.remove("hidden");
-    channelsCard.classList.remove("hidden");
-    dmCard.classList.remove("hidden");
-
-    hintEl.textContent = "Выбери канал или DM слева";
-    text.disabled = false;
-    sendBtn.disabled = false;
-
-    meNameEl.textContent = me.displayName;
-    meEmailEl.textContent = me.email;
-    meRoleEl.textContent = me.systemRole;
-
-    const canAdmin = (me.systemRole === "OWNER" || me.systemRole === "ADMIN" || me.isSuperadmin);
-    openAdminBtn.classList.toggle("hidden", !canAdmin);
-    applyAdminTabPermissions();
-  }
-
-  function applyAdminTabPermissions() {
-    const canOwnerView = (me && (me.systemRole === "OWNER" || me.isSuperadmin));
-    // OWNER/SUPERADMIN: все вкладки
-    // ADMIN: без "Аудит" и "DM аудит"
-    const hideForAdmin = new Set(["audit", "dms"]);
-    for (const t of adminTabs) {
-      const tab = t.dataset.adminTab;
-      if (!tab) continue;
-      const shouldHide = (!canOwnerView && hideForAdmin.has(tab));
-      t.classList.toggle("hidden", shouldHide);
-      // also hide corresponding view if needed
-      if (adminViews[tab]) adminViews[tab].classList.toggle("hidden", shouldHide || !t.classList.contains("active"));
-    }
-
-    // если текущая активная вкладка недоступна — переключим на roles
-    const activeTabEl = adminTabs.find(t => t.classList.contains("active"));
-    const activeTab = activeTabEl ? activeTabEl.dataset.adminTab : null;
-    if (activeTab && !canOwnerView && hideForAdmin.has(activeTab)) {
-      setAdminTab("roles");
-    }
-  }
-
-
-  logoutBtn.onclick = async () => {
-    try { await api("/api/logout", { method: "POST" }); } catch {}
-    uiLoggedOut();
-    statusEl.textContent = "Вышел";
-  };
-
-  async function loadPositions() {
-    const data = await api("/api/positions");
-    regPosition.innerHTML = "";
-    for (const p of data.positions) {
-      const opt = document.createElement("option");
-      opt.value = String(p.id);
-      opt.textContent = p.displayName;
-      regPosition.appendChild(opt);
-    }
-  }
-
-  async function refreshChannels() {
-    const data = await api("/api/channels");
-    channels = data.channels || [];
-    renderChannels();
-  }
-
-  async function refreshDmList() {
-    const data = await api("/api/dm");
-    dmChats = data.chats || [];
-    renderDmListUI();
-  }
-
-  loginBtn.onclick = async () => {
-    loginMsg.textContent = "";
-    loginBtn.disabled = true;
-    try {
-      const data = await api("/api/login", {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ email: loginEmail.value, password: loginPass.value })
-      });
-      me = data.me;
-      statusEl.textContent = "Вошёл";
-      uiLoggedIn();
-      await initWs();
-      await refreshChannels();
-      await refreshDmList();
-    } catch (e) {
-      loginMsg.textContent = String(e.message || e);
-    } finally {
-      loginBtn.disabled = false;
-    }
-  };
-
-  registerBtn.onclick = async () => {
-    registerMsg.textContent = "";
-    registerBtn.disabled = true;
-    try {
-      const data = await api("/api/register", {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({
-          displayName: regName.value,
-          email: regEmail.value,
-          password: regPass.value,
-          positionRoleId: Number(regPosition.value),
-          inviteToken: (document.getElementById('regInvite')?.value || '').trim()
-        })
-      });
-      me = data.me;
-      statusEl.textContent = "Зарегистрирован";
-      uiLoggedIn();
-      await initWs();
-      await refreshChannels();
-      await refreshDmList();
-    } catch (e) {
-      registerMsg.textContent = String(e.message || e);
-    } finally {
-      registerBtn.disabled = false;
-    }
-  };
-
-  function renderReceipt(msgId) {
-    const el = document.getElementById(`rc_${msgId}`);
-    if (!el) return;
-
-    // receipts показываем только на твоих сообщениях
-    const fromId = Number(messageFromId.get(msgId) || 0);
-    const isMine = me && fromId === Number(me.id);
-    if (!isMine) {
-      el.textContent = "";
-      el.classList.add("dim");
-      return;
-    }
-
-    el.classList.remove("dim");
-
-    const r = receiptByMessageId.get(msgId);
-    if (!r || !r.total) {
-      el.textContent = "✓";
-      return;
-    }
-
-    // чтобы не путать: readCount включает и тебя, это нормально (реально прочитал = ты тоже)
-    if (r.readCount >= r.total) {
-      el.textContent = "✓✓";
-    } else {
-      el.textContent = `✓ ${r.readCount}/${r.total}`;
-    }
-  }
-
-  function addMsg(m) {
-    messageFromId.set(m.id, Number(m.fromId));
-    if (m.read) receiptByMessageId.set(m.id, m.read);
-
-    const div = document.createElement("div");
-    div.className = "msg";
-
-    const at = new Date(m.at).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-    const isOn = onlineUserIds.has(Number(m.fromId));
-
-    div.innerHTML = `
-      <div class="meta">
-        <span style="display:flex; gap:8px; align-items:center;">
-          ${dotHtml(isOn)}
-          <span class="truncate">${esc(m.from)} • ${at}</span>
-        </span>
-        <span class="receipt" id="rc_${m.id}"></span>
-      </div>
-      <div class="bubble">${esc(m.text)}</div>
-    `;
-    log.appendChild(div);
-    renderReceipt(m.id);
-    log.scrollTop = log.scrollHeight;
-  }
-
-  function renderChannels() {
-    channelsEl.innerHTML = "";
-    for (const ch of channels) {
-      const active = (activeMode === "channel" && ch.id === activeChannelId);
-      const el = document.createElement("div");
-      el.className = "item" + (active ? " active" : "");
-
-      const name = "#" + ch.name + (ch.isPublic ? "" : " 🔒");
-      const unread = badgeHtml(ch.unreadCount);
-
-      el.innerHTML = `
-        <div class="leftline">
-          <span class="truncate">${esc(name)}</span>
-        </div>
-        ${unread}
-      `;
-
-      el.onclick = () => joinChannel(ch.id, ch.name);
-      channelsEl.appendChild(el);
-    }
-  }
-
-  function renderDmListUI() {
-    dmListEl.innerHTML = "";
-    for (const c of dmChats) {
-      const isOn = onlineUserIds.has(Number(c.otherUser.id));
-      const active = (activeMode === "dm" && Number(c.id) === Number(activeDmChatId));
-      const el = document.createElement("div");
-      el.className = "item" + (active ? " active" : "");
-
-      const last = c.last ? ` — ${c.last.text}` : "";
-      const unread = badgeHtml(c.unreadCount);
-
-      el.innerHTML = `
-        <div class="leftline" style="min-width:0;">
-          ${dotHtml(isOn)}
-          <div class="truncate"><b>${esc(c.otherUser.displayName)}</b><span class="muted">${esc(last).slice(0, 40)}${(last.length>40)?"…":""}</span></div>
-        </div>
-        ${unread}
-      `;
-      el.onclick = () => openDmChat(c.id, c.otherUser);
-      dmListEl.appendChild(el);
-    }
-  }
-
-  async function joinChannel(id, name) {
-    activeMode = "channel";
-    activeChannelId = id;
-    activeDmChatId = null;
-    activeDmOther = null;
-
-    titleEl.textContent = "#" + name;
-    hintEl.textContent = "";
-    updateHeaderStatus();
-    updateHeaderStatus();
-    log.innerHTML = "";
-    receiptByMessageId = new Map();
-    messageFromId = new Map();
-
-    renderChannels();
-    renderDmListUI();
-
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "join", channelId: id }));
-    }
-  }
-
-  async function openDmChat(chatId, otherUser) {
-    activeMode = "dm";
-    activeDmChatId = Number(chatId);
-    activeDmOther = otherUser || null;
-    activeChannelId = null;
-
-    titleEl.textContent = `DM: ${otherUser ? otherUser.displayName : ("#" + chatId)}`;
-    hintEl.textContent = "";
-    updateHeaderStatus();
-    log.innerHTML = "";
-    receiptByMessageId = new Map();
-    messageFromId = new Map();
-
-    renderChannels();
-    renderDmListUI();
-
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "dm_join", chatId: Number(chatId) }));
-    }
-  }
-
-  sendBtn.onclick = () => sendMessage();
-  text.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMessage(); });
-
-  function sendReadChannelIfPossible(messageId) {
-    if (!ws || ws.readyState !== 1) return;
-    if (!activeChannelId || !messageId) return;
-    ws.send(JSON.stringify({ type: "read", channelId: activeChannelId, lastReadMessageId: messageId }));
-  }
-  function sendReadDmIfPossible(messageId) {
-    if (!ws || ws.readyState !== 1) return;
-    if (!activeDmChatId || !messageId) return;
-    ws.send(JSON.stringify({ type: "dm_read", chatId: activeDmChatId, lastReadMessageId: messageId }));
-  }
-
-  function sendMessage() {
-    const t = text.value.trim();
-    if (!t) return;
-    if (!ws || ws.readyState !== 1) return;
-
-    if (activeMode === "channel") {
-      if (!activeChannelId) return;
-      ws.send(JSON.stringify({ type: "chat", text: t }));
-    } else if (activeMode === "dm") {
-      if (!activeDmChatId) return;
-      ws.send(JSON.stringify({ type: "dm_chat", text: t }));
-    } else return;
-
-    text.value = "";
-    text.focus();
-  }
-
-  async function initWs() {
-    if (ws) { try { ws.close(); } catch {} }
-    const wsProto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${wsProto}://${location.host}`);
-
-    ws.addEventListener("open", () => { statusEl.textContent = "✅ WebSocket подключен"; });
-    ws.addEventListener("close", () => { statusEl.textContent = "⚠️ WebSocket отключен"; });
-
-    ws.addEventListener("message", async (ev) => {
-      const msg = JSON.parse(ev.data);
-
-      if (msg.type === "init") {
-        me = msg.me;
-        channels = msg.channels || [];
-        onlineUserIds = new Set((msg.onlineUserIds || []).map(Number));
-        renderChannels();
-
-        if (channels.length) { joinChannel(channels[0].id, channels[0].name); updateHeaderStatus(); }
-        else {
-          titleEl.textContent = "Нет доступных каналов";
-          hintEl.textContent = "Попроси администратора выдать доступ";
-        }
-
-        await refreshDmList();
-        return;
-      }
-
-      if (msg.type === "presence_update") {
-        const uid = Number(msg.userId);
-        if (msg.online) onlineUserIds.add(uid);
-        else onlineUserIds.delete(uid);
-
-        // перерисуем списки чтобы точки online обновились
-        renderDmListUI();
-        updateHeaderStatus();
-        // в логах точка обновится только для новых сообщений — пока ок
-        return;
-      }
-
-      if (msg.type === "refresh_lists") {
-        await refreshChannels();
-        await refreshDmList();
-        return;
-      }
-
-      if (msg.type === "channel_notice") {
-        await refreshChannels();
-        return;
-      }
-
-      if (msg.type === "dm_notice") {
-        await refreshDmList();
-        return;
-      }
-
-      if (msg.type === "history") {
-        if (activeMode !== "channel") return;
-        if (msg.channelId !== activeChannelId) return;
-
-        const messages = msg.messages || [];
-        for (const m of messages) addMsg(m);
-
-        if (messages.length) sendReadChannelIfPossible(messages[messages.length - 1].id);
-        await refreshChannels();
-        return;
-      }
-
-      if (msg.type === "chat") {
-        if (activeMode !== "channel") return;
-        if (msg.channelId !== activeChannelId) return;
-
-        addMsg(msg.message);
-        sendReadChannelIfPossible(msg.message.id);
-        await refreshChannels();
-        return;
-      }
-
-      // НОВОЕ: батч обновление receipts для хвоста
-      if (msg.type === "read_progress_batch") {
-        if (activeMode !== "channel") return;
-        if (msg.channelId !== activeChannelId) return;
-
-        for (const it of (msg.items || [])) {
-          receiptByMessageId.set(Number(it.messageId), { readCount: Number(it.readCount), total: Number(it.total) });
-          renderReceipt(Number(it.messageId));
-        }
-        return;
-      }
-
-      // DM history
-      if (msg.type === "dm_history") {
-        if (activeMode !== "dm") return;
-        if (Number(msg.chatId) !== Number(activeDmChatId)) return;
-
-        if (msg.otherUser) {
-          activeDmOther = msg.otherUser;
-          titleEl.textContent = `DM: ${activeDmOther.displayName}`;
-          updateHeaderStatus();
-        }
-
-        const messages = msg.messages || [];
-        for (const m of messages) addMsg(m);
-
-        if (messages.length) sendReadDmIfPossible(messages[messages.length - 1].id);
-        await refreshDmList();
-        return;
-      }
-
-      if (msg.type === "dm_chat") {
-        if (activeMode !== "dm") {
-          await refreshDmList();
-          return;
-        }
-        if (Number(msg.chatId) !== Number(activeDmChatId)) {
-          await refreshDmList();
-          return;
-        }
-
-        addMsg(msg.message);
-        sendReadDmIfPossible(msg.message.id);
-        await refreshDmList();
-        return;
-      }
-
-      if (msg.type === "dm_read_progress") {
-        if (activeMode !== "dm") return;
-        if (Number(msg.chatId) !== Number(activeDmChatId)) return;
-
-        receiptByMessageId.set(Number(msg.messageId), msg.read);
-        renderReceipt(Number(msg.messageId));
-        return;
-      }
-
-      if (msg.type === "error") {
-        alert(msg.message || msg.code || "Error");
-      }
-    });
-  }
-
-  /* =======================
-     DM create flow
-  ======================= */
-  newDmBtn.onclick = async () => {
-    dmUserSelect.classList.toggle("hidden");
-    dmOpenBtn.classList.toggle("hidden");
-    if (!dmUserSelect.classList.contains("hidden") && dmUserSelect.options.length === 0) {
-      const data = await api("/api/users");
-      dmUserSelect.innerHTML = `<option value="">Выбери пользователя…</option>` + (data.users || [])
-        .map(u => `<option value="${u.id}">${esc(u.displayName)} (${esc(u.email)})</option>`).join("");
-    }
-  };
-
-  dmOpenBtn.onclick = async () => {
-    const uid = Number(dmUserSelect.value || 0);
-    if (!uid) return;
-    const opened = await api("/api/dm/open", {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ userId: uid })
-    });
-    await refreshDmList();
-
-    const chat = dmChats.find(c => Number(c.id) === Number(opened.chatId));
-    if (chat) openDmChat(chat.id, chat.otherUser);
-    else openDmChat(opened.chatId, null);
-  };
-
-  /* =======================
-     Admin UI (как раньше)
-  ======================= */
-  function setAdminTab(tab) {
-    for (const t of adminTabs) t.classList.toggle("active", t.dataset.adminTab === tab);
-    for (const k of Object.keys(adminViews)) adminViews[k].classList.toggle("hidden", k !== tab);
-  }
-  adminTabs.forEach(t => t.onclick = () => setAdminTab(t.dataset.adminTab));
-
-  openAdminBtn.onclick = async () => {
-    adminCard.classList.remove("hidden");
-    applyAdminTabPermissions();
-    await refreshAdmin();
-  };
-  closeAdminBtn.onclick = () => adminCard.classList.add("hidden");
-
-  function renderAccessPickers() {
-    accessRoles.innerHTML = roles.map(r => `
-      <label class="muted" style="display:flex; gap:8px; align-items:center; margin:6px 0;">
-        <input type="checkbox" data-access-role="${r.id}" />
-        ${esc(r.displayName)}
-      </label>
-    `).join("");
-
-    accessUsers.innerHTML = users.map(u => `
-      <label class="muted" style="display:flex; gap:8px; align-items:center; margin:6px 0;">
-        <input type="checkbox" data-access-user="${u.id}" />
-        ${esc(u.displayName)} <span class="muted">(${esc(u.email)})</span>
-      </label>
-    `).join("");
-  }
-
-  async function loadChannelAccessToUI(channelId) {
-    const a = await api(`/api/admin/channels/${channelId}/access`);
-    const roleSet = new Set((a.roleIds || []).map(Number));
-    const userSet = new Set((a.userIds || []).map(Number));
-    [...document.querySelectorAll("[data-access-role]")].forEach(chk => chk.checked = roleSet.has(Number(chk.dataset.accessRole)));
-    [...document.querySelectorAll("[data-access-user]")].forEach(chk => chk.checked = userSet.has(Number(chk.dataset.accessUser)));
-    accessMsg.textContent = "✅ Доступ загружен";
-  }
-
-  async function refreshAdmin() {
-    const r = await api("/api/admin/roles");
-    roles = r.roles || [];
-    rolesList.innerHTML = roles.map(x => `<div><code>${esc(x.name)}</code> — ${esc(x.displayName)} (id:${x.id})</div>`).join("");
-
-    const u = await api("/api/admin/users");
-    users = u.users || [];
-    usersList.innerHTML = users.map(us => `
-      <div class="card" style="margin-top:10px;">
-        <div><b>${esc(us.displayName)}</b> <span class="pill">${esc(us.systemRole)}</span></div>
-        <div class="muted">${esc(us.email)}</div>
-        <div class="muted" id="userRoles_${us.id}">Роли: …</div>
-
-        <div class="row">
-          <select data-user-role-select="${us.id}"><option value="">Выдать роль…</option>
-            ${roles.map(r => `<option value="${r.id}">${esc(r.displayName)}</option>`).join("")}
-          </select>
-          <button data-user-role-btn="${us.id}">Выдать</button>
-        </div>
-
-        <div class="row" style="flex-wrap:wrap;">
-          <button class="danger" data-user-role-remove-open="${us.id}">Снять роль…</button>
-          <select class="hidden" data-user-role-remove-select="${us.id}"><option value="">Выбери роль</option></select>
-          <button class="hidden danger" data-user-role-remove-btn="${us.id}">Снять</button>
-        </div>
-      </div>
-    `).join("");
-
-    for (const us of users) {
-      (async () => {
-        try {
-          const ur = await api(`/api/admin/users/${us.id}/roles`);
-          const list = ur.roles || [];
-          const label = document.getElementById(`userRoles_${us.id}`);
-          label.textContent = "Роли: " + (list.map(x => x.displayName).join(", ") || "—");
-          const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
-          selRemove.innerHTML = `<option value="">Выбери роль для снятия</option>` + list.map(x => `<option value="${x.id}">${esc(x.displayName)}</option>`).join("");
-        } catch {}
-      })();
-
-      const btnAdd = document.querySelector(`[data-user-role-btn="${us.id}"]`);
-      const selAdd = document.querySelector(`[data-user-role-select="${us.id}"]`);
-      btnAdd.onclick = async () => {
-        const roleId = Number(selAdd.value || 0);
-        if (!roleId) return;
-        await api(`/api/admin/users/${us.id}/roles`, { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ roleId })});
-        await refreshAdmin();
-      };
-
-      const openRemove = document.querySelector(`[data-user-role-remove-open="${us.id}"]`);
-      const selRemove = document.querySelector(`[data-user-role-remove-select="${us.id}"]`);
-      const btnRemove = document.querySelector(`[data-user-role-remove-btn="${us.id}"]`);
-      openRemove.onclick = () => { selRemove.classList.toggle("hidden"); btnRemove.classList.toggle("hidden"); };
-      btnRemove.onclick = async () => {
-        const roleId = Number(selRemove.value || 0);
-        if (!roleId) return;
-        await api(`/api/admin/users/${us.id}/roles/${roleId}`, { method: "DELETE" });
-        await refreshAdmin();
-      };
-    }
-
-    const ch = await api("/api/admin/channels");
-    adminAllChannels = ch.channels || [];
-    accessChannel.innerHTML = adminAllChannels.map(c => `<option value="${c.id}">#${esc(c.name)}${c.isPublic ? "" : " 🔒"}</option>`).join("");
-    renderAccessPickers();
-    if (adminAllChannels.length) await loadChannelAccessToUI(Number(accessChannel.value));
-
-    try {
-      const a = await api("/api/audit");
-      auditList.innerHTML = (a.logs || []).map(l => `
-        <div class="card" style="margin-top:10px;">
-          <div><b>${esc(l.action)}</b> <span class="muted">${esc(new Date(l.at).toLocaleString())}</span></div>
-          <div class="muted">actor: ${esc(l.actor.displayName)} (${esc(l.actor.email)})</div>
-          <div class="muted"><code>${esc(JSON.stringify(l.meta))}</code></div>
-        </div>
-      `).join("");
-    } catch {
-      auditList.innerHTML = `<div class="muted">Аудит доступен только OWNER/SUPERADMIN</div>`;
-    }
-
-    try {
-      const d = await api("/api/admin/dm/chats");
-      const chats = d.chats || [];
-      dmAuditSelect.innerHTML = chats.map(c => {
-        const last = c.last ? ` — ${esc(c.last.text).slice(0, 30)}${c.last.text.length > 30 ? "…" : ""}` : "";
-        return `<option value="${c.id}">${esc(c.a.displayName)} ↔ ${esc(c.b.displayName)}${last}</option>`;
-      }).join("");
-      dmAuditLog.textContent = chats.length ? "Выбери диалог и нажми «Открыть»." : "Пока нет личных диалогов.";
-      dmAuditMessages.innerHTML = "";
-    } catch {
-      dmAuditSelect.innerHTML = `<option value="">Недоступно</option>`;
-      dmAuditLog.textContent = "DM аудит доступен только OWNER/SUPERADMIN";
-      dmAuditMessages.innerHTML = "";
-    }
-
-    // invites
-    try {
-      const invs = await api("/api/admin/invites");
-      const list = invs.invites || [];
-      invitesList.innerHTML = list.map(it => {
-        const link = `${location.origin}/?invite=${it.token}`;
-        const exp = it.expiresAt ? new Date(it.expiresAt).toLocaleString() : "—";
-        const used = `${it.usedCount}/${it.maxUses}`;
-        const revoked = it.isRevoked ? " <span class=\"pill danger\">отозван</span>" : "";
-        return `
-          <div class="card" style="margin-top:10px;">
-            <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
-              <div class="truncate"><b>Инвайт</b>${revoked} <span class="muted">использовано: ${used} • истекает: ${esc(exp)}</span></div>
-              <div style="display:flex; gap:6px;">
-                <button data-invite-copy="${it.token}">Копировать ссылку</button>
-                <button class="danger" data-invite-revoke="${it.id}" ${it.isRevoked ? "disabled" : ""}>Отозвать</button>
-              </div>
-            </div>
-            <div class="small"><code>${esc(link)}</code></div>
-          </div>
-        `;
-      }).join("") || `<div class="muted">Пока нет инвайтов. Создай первый.</div>`;
-
-      // bind buttons
-      [...document.querySelectorAll("[data-invite-copy]")].forEach(btn => {
-        btn.onclick = async () => {
-          const t = btn.dataset.inviteCopy;
-          const link = `${location.origin}/?invite=${t}`;
-          try { await navigator.clipboard.writeText(link); inviteMsg.textContent = "✅ Ссылка скопирована"; }
-          catch { inviteMsg.textContent = "Скопируй вручную: " + link; }
-        };
-      });
-
-      [...document.querySelectorAll("[data-invite-revoke]")].forEach(btn => {
-        btn.onclick = async () => {
-          const id = Number(btn.dataset.inviteRevoke || 0);
-          if (!id) return;
-          await api(`/api/admin/invites/${id}`, { method: "DELETE" });
-          inviteMsg.textContent = "✅ Инвайт отозван";
-          await refreshAdmin();
-        };
-      });
-    } catch {
-      invitesList.innerHTML = `<div class="muted">Инвайты доступны только ADMIN/OWNER</div>`;
-    }
-
-    applyAdminTabPermissions();
-  }
-
-  createRoleBtn.onclick = async () => {
-    createRoleBtn.disabled = true;
-    try {
-      await api("/api/admin/roles", { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ name: newRoleName.value, displayName: newRoleDisplay.value })});
-      newRoleName.value = "";
-      newRoleDisplay.value = "";
-      await refreshAdmin();
-    } catch (e) { alert(String(e.message || e)); }
-    finally { createRoleBtn.disabled = false; }
-  };
-
-  createChannelBtn.onclick = async () => {
-    createChannelBtn.disabled = true;
-    try {
-      await api("/api/admin/channels", { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ name: newChannelName.value, isPublic: newChannelPublic.value === "true" })});
-      newChannelName.value = "";
-      await refreshAdmin();
-      await refreshChannels();
-    } catch (e) { alert(String(e.message || e)); }
-    finally { createChannelBtn.disabled = false; }
-  };
-
-  loadAccessBtn.onclick = async () => {
-    accessMsg.textContent = "";
-    try { await loadChannelAccessToUI(Number(accessChannel.value)); }
-    catch (e) { accessMsg.textContent = "❌ " + String(e.message || e); }
-  };
-
-  accessChannel.onchange = async () => {
-    accessMsg.textContent = "";
-    try { await loadChannelAccessToUI(Number(accessChannel.value)); } catch {}
-  };
-
-  saveAccessBtn.onclick = async () => {
-    accessMsg.textContent = "";
-    saveAccessBtn.disabled = true;
-    try {
-      const channelId = Number(accessChannel.value || 0);
-      const roleIds = [...document.querySelectorAll("[data-access-role]")].filter(x => x.checked).map(x => Number(x.dataset.accessRole));
-      const userIds = [...document.querySelectorAll("[data-access-user]")].filter(x => x.checked).map(x => Number(x.dataset.accessUser));
-      await api(`/api/admin/channels/${channelId}/access`, { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ roleIds, userIds })});
-      accessMsg.textContent = "✅ Доступ сохранён";
-      await refreshChannels();
-    } catch (e) {
-      accessMsg.textContent = "❌ " + String(e.message || e);
-    } finally {
-      saveAccessBtn.disabled = false;
-    }
-  };
-
-
-  inviteCreateBtn.onclick = async () => {
-    const maxUses = Number(inviteMaxUses.value || 1);
-    const expiresInHours = Number(inviteExpiresHours.value || 0);
-    await createInviteAndCopy(maxUses, expiresInHours);
-    inviteMaxUses.value = "";
-    inviteExpiresHours.value = "";
-  };
-
-  inviteQuick1.onclick = async () => {
-    inviteMaxUses.value = "1";
-    inviteExpiresHours.value = "0";
-    await createInviteAndCopy(1, 0);
-  };
-  inviteQuick24.onclick = async () => {
-    inviteMaxUses.value = "1";
-    inviteExpiresHours.value = "24";
-    await createInviteAndCopy(1, 24);
-  };
-  inviteQuick10.onclick = async () => {
-    inviteMaxUses.value = "10";
-    inviteExpiresHours.value = "0";
-    await createInviteAndCopy(10, 0);
-  };
-
-
-  dmAuditLoadBtn.onclick = async () => {
-    const chatId = Number(dmAuditSelect.value || 0);
-    if (!chatId) return;
-    dmAuditLog.textContent = "Загрузка…";
-    dmAuditMessages.innerHTML = "";
-    try {
-      const data = await api(`/api/admin/dm/chats/${chatId}/messages`);
-      const msgs = data.messages || [];
-      dmAuditLog.textContent = `Сообщений: ${msgs.length}. Просмотр залогирован в аудит.`;
-      dmAuditMessages.innerHTML = msgs.map(m => {
-        const at = new Date(m.at).toLocaleString();
-        return `
-          <div class="card" style="margin-top:10px;">
-            <div class="muted">${esc(m.from)} (${esc(m.fromEmail)}) • ${esc(at)}</div>
-            <div>${esc(m.text)}</div>
-          </div>
-        `;
-      }).join("");
-    } catch (e) {
-      dmAuditLog.textContent = "❌ " + String(e.message || e);
-    }
-  };
-
-  /* =======================
-     Boot
-  ======================= */
-  (async () => {
-    try {
-      // invite from URL: ?invite=TOKEN
-      const params = new URLSearchParams(location.search);
-      const inv = params.get("invite");
-      hasInviteParam = Boolean(inv);
-
-      // если инвайта нет — скрываем вкладку регистрации (чтобы никто не пытался регаться)
-      tabRegister.classList.toggle("hidden", !hasInviteParam);
-
-      const regInvEl = document.getElementById("regInvite");
-      if (hasInviteParam && regInvEl) {
-        regInvEl.value = inv;
-        setAuthMode("register");
-      } else {
-        setAuthMode("login");
-      }
-
-      await loadPositions();
-
-      const meResp = await api("/api/me");
-      me = meResp.me;
-      statusEl.textContent = "Сессия активна";
-      uiLoggedIn();
-      await initWs();
-      await refreshChannels();
-      await refreshDmList();
-    } catch {
-      statusEl.textContent = "Нужно войти";
-      uiLoggedOut();
-      setAuthMode("login");
-    }
-  })();
-</script>
+<script src="/app.js" defer></script>
 </body>
 </html>
